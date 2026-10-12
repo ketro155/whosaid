@@ -93,3 +93,69 @@ out and loses its return value.
   are not covered.
 - Text bodies only. Reactions, attachments, images and quoted-reply bodies are
   flattened to text or dropped.
+
+## Meeting transcripts
+
+[`teams-transcript-scraper.js`](teams-transcript-scraper.js) exports the
+Transcript panel of a meeting's Recap page for `whosaid teams ingest-transcript`.
+
+### Where the transcript lives
+
+The panel is not in the Teams page. It is a cross-origin SharePoint iframe
+(the "Recap" frame, a `*.sharepoint.com` URL), so evaluate the scraper in that
+frame. Over CDP, list targets with iframes included and drive the iframe's own
+target id; a script in the Teams top frame cannot reach into it.
+
+### Running it
+
+1. Open the meeting's Recap in Teams web and select the Transcript tab.
+2. In the **Teams top frame**, evaluate `TOP_FRAME_SNIPPET` (in the comment at the
+   end of the scraper). It returns `{title, scheduled, start_iso}` from the recap
+   header and `document.title`. Set the result as `window.__TT_MEETING` in the
+   iframe, or pass `--start` at ingest instead.
+3. In the **Recap iframe**, evaluate the whole scraper. It installs
+   `window.__tt` and runs detached; poll until `window.__tt.done`, and check
+   `window.__tt.error` and `window.__tt.result.warning`.
+4. Save `JSON.stringify(window.__tt.result)` and ingest it:
+
+```bash
+whosaid teams ingest-transcript transcript.json --into ~/meetings --tz America/Los_Angeles
+```
+
+Options, set on `window` before evaluating: `__TT_METHOD` (`"fiber"` or
+`"scroll"`, to force one path), `__TT_SETTLE_MS` (scroll settle, default 450).
+
+### Output
+
+```json
+{"kind": "teams-transcript", "method": "fiber", "transcript_id": "e64e...", "locale": "en-us",
+ "recap_url": "https://...sharepoint.com/...", "expected": 476,
+ "meeting": {"title": "Weekly Sync", "scheduled": "Monday, October 12, 2026 6:30 AM - 7:30 AM",
+             "start_iso": "2026-10-12T13:30:00.000Z"},
+ "entries": [{"idx": 4, "entry_id": "...", "type": "Text", "speaker": "Doe, Jane",
+              "speaker_id": "...", "start_s": 32, "end_s": 35, "text": "...", "lang": "en-us"}]}
+```
+
+`type` is `Text`, `StartEvent` or `StopEvent` on the fiber path, and `Text` or
+`Event` on the scroll path. `start_s` and `end_s` are seconds from the meeting
+start. A `warning` appears when the entry count differs from `expected`.
+
+### DOM contract (the virtualization)
+
+- **Scroller:** `#scrollToTargetTargetedFocusZone`. **List:**
+  `.ms-List[role="list"]` inside `#OneTranscript` (Fluent UI v8 `List`).
+- **Virtualized:** only about 30 `.ms-List-cell[data-list-index]` cells are
+  mounted at once, so a single DOM read sees a slice.
+- **Primary path (fiber):** walk the list element's `__reactFiber$*` `.return`
+  chain to the props holding `items`. That array is every entry
+  (`speakerDisplayName`, `speakerId`, `entryId`, `type`, `timestamp` as an ISO
+  8601 duration such as `PT1M5S`, `endTime`, `text`, `spokenLanguageTag`). It
+  reads without scrolling, so the panel does not move. `#OneTranscript`'s props
+  carry `transcriptId`.
+- **Fallback (scroll):** jump to the top, then step the scroller by about 0.85 x
+  `clientHeight`, harvesting every frame into a map keyed by `#sub-entry-N`'s
+  `aria-posinset`. Stop when the scroller has not moved for 3 frames (the
+  bottom), then restore the original `scrollTop`. Speaker and offset come from `#entry-N[role="group"]`'s
+  `aria-label` ("Doe, Jane 1 minute 5 seconds"). Event rows have a blank label.
+- **Completeness:** `aria-setsize` on any `#sub-entry-N` is the total, recorded as
+  `expected`.

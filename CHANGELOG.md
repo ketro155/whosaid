@@ -17,6 +17,17 @@ All notable changes to whosaid are documented here. This project adheres to
   `[outlook.roles]` layer over the shared `[teams.*]` map, and the roll-up audit treats both
   text-only kinds alike.
 
+- **Teams meeting transcripts (`whosaid teams ingest-transcript`).** New
+  `contrib/teams-scraper/teams-transcript-scraper.js` reads the Recap page's Transcript panel.
+  That panel is a virtualized Fluent UI list that mounts only about 30 rows at a time, so the
+  scraper reads the list's full `items` array from its React props (no scrolling, no UI change)
+  and falls back to stepping the scroller and harvesting every frame, keyed by
+  `aria-posinset`, then restoring `scrollTop`. It checks the count against `aria-setsize`.
+  `lib/teams_transcript.py` ingests the result into one folder per meeting, with
+  offset-stamped `teams.speakers.txt` and a `teams-transcript` sidecar; re-ingest is idempotent
+  on `transcript_id`. The roll-up audit treats the new kind as text-only, like `teams-chat`.
+  Checked live on a 476-entry transcript (476 of 476 read, 474 turns).
+
 ### Changed
 
 - **`whosaid_meetings`, `whosaid_prs` and `whosaid_speakers` page their results (#90).** A

@@ -247,6 +247,15 @@ USAGE
                                         thread per local day, outlook.speakers.txt,
                                         source.kind = "outlook-mail". Names/roles:
                                         [outlook.*] over the shared [teams.*] map.
+  whosaid teams ingest-transcript <transcript.json> --into DIR [--start ISO]
+                  [--title T] [--tz ZONE] [--self NAME] [--dry-run]
+                                        Fold a Teams meeting transcript (Recap
+                                        panel, from teams-transcript-scraper.js)
+                                        into one dated folder per meeting:
+                                        teams.speakers.txt stamped with offsets
+                                        from the meeting start, plus a sidecar
+                                        tagged source.kind = "teams-transcript".
+                                        Idempotent on the transcript id.
   whosaid ingest <audio> [<audio> ...] --into DIR [--folder-by created|mtime]
                                         [--tz ZONE] [--action-items] [--commitments]
                                         [--min-words N] [--hook CMD] [flags]
@@ -1617,14 +1626,21 @@ cmd_samples() {
 }
 
 # whosaid teams ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]
-# Non-audio chat adapter (issue #49); all logic lives in lib/teams_chat.py (stdlib-only).
+# whosaid teams ingest-transcript <transcript.json> --into DIR [--start ISO] [--title T] [...]
+# Non-audio adapters (issue #49): chats in lib/teams_chat.py, meeting transcripts in
+# lib/teams_transcript.py (both stdlib-only).
 cmd_teams() {
   if want_help "$@"; then cmd_help; exit 0; fi
   if [[ $# -eq 0 ]]; then
     log "teams: usage: whosaid teams ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]"
+    log "       whosaid teams ingest-transcript <transcript.json> --into DIR [--start ISO] [--title T] [--tz ZONE] [--self NAME] [--dry-run]"
     exit 1
   fi
-  "$WHOSAID_PY" "$REPO_DIR/lib/teams_chat.py" "$@"
+  if [[ "$1" == "ingest-transcript" ]]; then
+    "$WHOSAID_PY" "$REPO_DIR/lib/teams_transcript.py" "$@"
+  else
+    "$WHOSAID_PY" "$REPO_DIR/lib/teams_chat.py" "$@"
+  fi
 }
 
 # whosaid outlook ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]

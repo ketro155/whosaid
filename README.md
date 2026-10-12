@@ -363,6 +363,26 @@ from the voice registry's role for the same name. `--self NAME` overrides both. 
 overlapping export is safe: messages are deduplicated on `epoch_ms` and merged into the existing
 folder, and `--dry-run` shows what would be written.
 
+### `whosaid teams ingest-transcript`: Microsoft Teams meeting transcripts, no audio
+
+When Teams has already transcribed a meeting, the Recap page's Transcript panel names every
+speaker. `whosaid teams ingest-transcript` adds that transcript to the workspace without the audio.
+
+```bash
+whosaid teams ingest-transcript transcript.json --into ~/meetings --tz America/Los_Angeles --self Alice_Example
+```
+
+The input is `window.__tt.result` from
+[`contrib/teams-scraper/teams-transcript-scraper.js`](contrib/teams-scraper/README.md#meeting-transcripts).
+The panel is a virtualized list, so the scraper reads the list's full item array from React
+rather than the few rows on screen, and falls back to a scroll-and-harvest pass that puts the
+scroll position back. One meeting becomes one folder named from the meeting start
+(`YYYY-MM-DD-HHMM`). `teams.speakers.txt` stamps each turn as an offset from the start, like a
+recording's transcript, and `teams.diarization.json` has `source.kind` `"teams-transcript"`,
+the `transcript_id`, and the Start/Stop events. The start comes from the export's
+`meeting.start_iso` or from `--start ISO`. Re-ingest rewrites the folder that already holds the
+same `transcript_id`. `[teams.names]`, `[teams.roles]`, `--self` and `--dry-run` work as for chat.
+
 ## Search your meetings
 
 A workspace with a dozen meetings is a corpus you cannot reread. `whosaid index` turns it into

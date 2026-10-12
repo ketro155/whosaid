@@ -210,8 +210,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus", ".webm"}
-# Text-only sidecar source kinds (lib/teams_chat.py): no audio, no plain .txt expected.
-TEXT_KINDS = frozenset({"teams-chat", "outlook-mail"})
+# Text-only sidecar source kinds (lib/teams_chat.py, lib/teams_transcript.py): no audio,
+# no plain .txt expected.
+TEXT_KINDS = frozenset({"teams-chat", "outlook-mail", "teams-transcript"})
 # Meeting folder names: YYYY-MM-DD-HHMM, or that plus a numeric collision
 # suffix (-2, -3, ...) appended by the bash ingest side when the plain dated
 # folder already holds a different recording.
@@ -1169,6 +1170,7 @@ def recurring_topics(speakers_texts: dict[str, str]) -> list[tuple[str, int, int
     scored = [(t, c, len(docs[t])) for t, c in counts.items() if len(docs[t]) >= 2]
     scored.sort(key=lambda x: (-x[1], -x[2], x[0]))
     return scored[:16]
+
 
 
 def render_index(ws: Path, meetings: list[Meeting], orphans: list[str], stale: list[str],
