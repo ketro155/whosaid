@@ -59,7 +59,8 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const qsa = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-  const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  // Zero-width characters (some senders pad display names with them) are dropped too.
+  const oneLine = (s) => String(s || '').replace(/[\u200B-\u200F\u2060\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
 
   function listRows() { return qsa('[role="listbox"] [role="option"][data-convid]'); }
   function listScroller() {
