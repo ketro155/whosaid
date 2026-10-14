@@ -114,7 +114,7 @@
     /^You don't often get email from .*Learn why this is important\.?$/i,
     /^CAUTION: This email originated from outside/i,
     /^Some content in this message has been blocked/i,
-    /^[-—–]{2,}.*$/,
+    /^[-\u2014\u2013]{2,}.*$/,
     /^Reply above this line\.?$/i,
     /^Get Outlook for (iOS|Android)$/i,
   ];
