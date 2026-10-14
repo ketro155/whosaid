@@ -6,6 +6,17 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Outlook mail as a source-tagged corpus.** `contrib/outlook-scraper/outlook-mail-scraper.js`
+  walks the Outlook on the web message list (a folder or a search) the way the Teams scraper
+  walks the chat rail and emits the same raw_by_chat shape, keyed by thread subject with the
+  conversation id as `chat_id`. `whosaid outlook ingest` folds it in as one folder per thread
+  per local day: `outlook.speakers.txt` plus a sidecar with `source.kind = "outlook-mail"`.
+  `lib/teams_chat.py` gained a `Source` profile (`--source teams|outlook`); `[outlook.names]` /
+  `[outlook.roles]` layer over the shared `[teams.*]` map, and the roll-up audit treats both
+  text-only kinds alike.
+
 ### Changed
 
 - **`whosaid_meetings`, `whosaid_prs` and `whosaid_speakers` page their results (#90).** A

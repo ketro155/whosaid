@@ -971,7 +971,7 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("ws", nargs="?", help=ws_help)
     pm.add_argument("--json", action="store_true", help="print a JSON array")
     pm.add_argument("--kind", default=None, metavar="K",
-                    help='only meetings of this source kind, e.g. "teams-chat" or "audio"')
+                    help='only meetings of this source kind, e.g. "teams-chat", "outlook-mail" or "audio"')
     pm.set_defaults(func=cmd_meetings)
 
     pw = sub.add_parser("wiki", help=f"render the generated wiki (default: <ws>/{WIKI_NAME})")

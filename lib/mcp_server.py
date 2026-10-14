@@ -1274,7 +1274,8 @@ _DESC_WS_PERSON = (
 _DESC_WS_MEETINGS = (
     "List the meetings in the workspace as the graph knows them: folder, date, duration, "
     "attendees (speaker labels), action-item count, and kind (source origin: \"teams-chat\" "
-    "for a Microsoft Teams chat folder, \"audio\" for a recorded meeting; pass kind to filter). "
+    "for a Microsoft Teams chat folder, \"outlook-mail\" for an Outlook mail thread, "
+    "\"audio\" for a recorded meeting; pass kind to filter). "
     "The folder names are what whosaid_search "
     "hits carry, what whosaid_context takes, and what the "
     "whosaid://workspace/meeting/{folder}/... resources use. Newest first. Filter with kind, "

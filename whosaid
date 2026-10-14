@@ -14,6 +14,7 @@
 #   whosaid <audio> [...]         Transcribe (and, by default, diarize) audio file(s).
 #   whosaid ingest <a...> --into D  Transcribe into a dated meeting workspace.
 #   whosaid teams ingest <export.json> --into D  Ingest a Teams chat export as a source-tagged corpus.
+#   whosaid outlook ingest <export.json> --into D  Ingest an Outlook mail export the same way.
 #   whosaid roll-up <dir>           Rebuild the meeting-workspace index and audit.
 #   whosaid reprocess <ws> [M...]   Re-diarize meetings an older diarizer got wrong; keep labels and edits.
 #   whosaid index <ws>              Build the workspace search index, graph, and wiki.
@@ -76,7 +77,7 @@ if [[ -z "$WHOSAID_PY" ]]; then
   # Only the commands that run a lib/*.py module or inline snippet need it;
   # transcribe/record/enroll/relabel/install/setup/mcp/help/version/doctor do not.
   case "${1:-}" in
-    samples|speakers|teams|ingest|backfill|roll-up|rollup|reprocess|commitments|worklist|index|search|context|graph|wiki|watch|memos)
+    samples|speakers|teams|outlook|ingest|backfill|roll-up|rollup|reprocess|commitments|worklist|index|search|context|graph|wiki|watch|memos)
       echo "whosaid: no Python >= 3.11 found; set WHOSAID_PYTHON=/path/to/python3.11+ or run: uv python install 3.13" >&2
       exit 1
       ;;
@@ -240,6 +241,12 @@ USAGE
                                         teams.diarization.json sidecar tagged
                                         source.kind = "teams-chat". Idempotent.
                                         Names/roles: [teams.names], [teams.roles].
+  whosaid outlook ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]
+                                        Same, for an Outlook on the web mail export
+                                        (contrib/outlook-scraper): one folder per
+                                        thread per local day, outlook.speakers.txt,
+                                        source.kind = "outlook-mail". Names/roles:
+                                        [outlook.*] over the shared [teams.*] map.
   whosaid ingest <audio> [<audio> ...] --into DIR [--folder-by created|mtime]
                                         [--tz ZONE] [--action-items] [--commitments]
                                         [--min-words N] [--hook CMD] [flags]
@@ -1620,6 +1627,17 @@ cmd_teams() {
   "$WHOSAID_PY" "$REPO_DIR/lib/teams_chat.py" "$@"
 }
 
+# whosaid outlook ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]
+# Outlook mail adapter: the Teams chat ingest with the outlook source profile.
+cmd_outlook() {
+  if want_help "$@"; then cmd_help; exit 0; fi
+  if [[ "${1:-}" != "ingest" ]]; then
+    log "outlook: usage: whosaid outlook ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]"
+    exit 1
+  fi
+  "$WHOSAID_PY" "$REPO_DIR/lib/teams_chat.py" "$@" --source outlook
+}
+
 # ---- speakers -----------------------------------------------------------------
 # Migration stays stdlib-only: a new machine can restore identities without
 # downloading or initializing diarization models.
@@ -2145,6 +2163,9 @@ case "${1:-}" in
     ;;
   teams)
     cmd_teams "${@:2}"
+    ;;
+  outlook)
+    cmd_outlook "${@:2}"
     ;;
   ingest)
     cmd_ingest "${@:2}"

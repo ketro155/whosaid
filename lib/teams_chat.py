@@ -14,8 +14,13 @@ Input is a hand-off file: a list of message records, an object
 (ISO 8601) as the fallback clock, plus optional "chat_id", "url". epoch_ms wins
 over epoch. Records may be unsorted and duplicated (epoch dedups).
 
+The same ingest serves Outlook mail (contrib/outlook-scraper): with --source outlook
+the files are outlook.speakers.txt / outlook.diarization.json, source.kind is
+"outlook-mail", "chat" is the thread subject and "chat_id" the conversation id.
+
 Usage:
-  python3 lib/teams_chat.py ingest <export.json> --into WS [--tz ZONE] [--self NAME] [--dry-run]
+  python3 lib/teams_chat.py ingest <export.json> --into WS [--tz ZONE] [--self NAME]
+                                   [--source teams|outlook] [--dry-run]
 
 Re-ingest is idempotent: an existing folder holding the same chat-day is merged
 (dedup on epoch_ms) and rewritten in place, never renamed. Stdlib only.
@@ -28,17 +33,45 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wsconfig  # noqa: E402
 
-BASE = "teams"
-SPEAKERS_NAME = f"{BASE}.speakers.txt"
-SIDECAR_NAME = f"{BASE}.diarization.json"
-KIND = "teams-chat"
-SCRAPER = "teams-dom-scraper@1"
+
+
+@dataclass(frozen=True)
+class Source:
+    """One text-only source: file base name, sidecar source.kind and provenance labels.
+    `cfg` is the whosaid.toml table holding [<cfg>.names] / [<cfg>.roles]."""
+    base: str
+    kind: str
+    platform: str
+    label: str      # the "# Source:" header word
+    scraper: str
+    cfg: str
+
+    @property
+    def speakers_name(self) -> str:
+        return f"{self.base}.speakers.txt"
+
+    @property
+    def sidecar_name(self) -> str:
+        return f"{self.base}.diarization.json"
+
+
+TEAMS = Source("teams", "teams-chat", "microsoft-teams", "ms-teams-chat", "teams-dom-scraper@1", "teams")
+OUTLOOK = Source("outlook", "outlook-mail", "microsoft-outlook", "ms-outlook-mail", "outlook-dom-scraper@1", "outlook")
+SOURCES = {"teams": TEAMS, "outlook": OUTLOOK}
+TEXT_KINDS = frozenset(s.kind for s in SOURCES.values())
+
+BASE = TEAMS.base
+SPEAKERS_NAME = TEAMS.speakers_name
+SIDECAR_NAME = TEAMS.sidecar_name
+KIND = TEAMS.kind
+SCRAPER = TEAMS.scraper
 DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{4}(?:-\d+)?$")
 
 
@@ -267,8 +300,8 @@ def group_chat_days(records: list[dict], tz: tzinfo, name_map: dict[str, str]) -
 
 # ---- C3: find / merge an existing folder ------------------------------------------------
 
-def read_sidecar(folder: Path) -> dict | None:
-    p = folder / SIDECAR_NAME
+def read_sidecar(folder: Path, src: Source = TEAMS) -> dict | None:
+    p = folder / src.sidecar_name
     if not p.is_file():
         return None
     try:
@@ -278,17 +311,17 @@ def read_sidecar(folder: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def find_existing(ws: Path, group: dict) -> Path | None:
+def find_existing(ws: Path, group: dict, src: Source = TEAMS) -> Path | None:
     want = chat_identity(group["chat_id"], group["chat_name"])
     for d in sorted(p for p in Path(ws).iterdir() if p.is_dir()):
-        sc = read_sidecar(d)
-        src = (sc or {}).get("source")
-        if not isinstance(src, dict) or src.get("kind") != KIND or src.get("day") != group["day"]:
+        sc = read_sidecar(d, src)
+        meta = (sc or {}).get("source")
+        if not isinstance(meta, dict) or meta.get("kind") != src.kind or meta.get("day") != group["day"]:
             continue
-        if group["chat_id"] and src.get("chat_id"):
-            same = src["chat_id"] == group["chat_id"]
+        if group["chat_id"] and meta.get("chat_id"):
+            same = meta["chat_id"] == group["chat_id"]
         else:
-            same = src.get("chat_name") == group["chat_name"]
+            same = meta.get("chat_name") == group["chat_name"]
         if same:
             return d
     return None
@@ -316,11 +349,11 @@ def existing_messages(sidecar: dict | None) -> dict[int, tuple[str, str]]:
 # ---- C4 / C5: render --------------------------------------------------------------------
 
 def render_speakers(chat_name: str, scraped_date: str, messages: dict[int, tuple[str, str]],
-                    roles: dict[str, str], tz: tzinfo) -> str:
+                    roles: dict[str, str], tz: tzinfo, src: Source = TEAMS) -> str:
     speakers = sorted({s for s, _ in messages.values()})
     lines = [
-        f"# Speaker-labeled transcript: {BASE}",
-        f"# Source: ms-teams-chat ({chat_name}), scraped {scraped_date}",
+        f"# Speaker-labeled transcript: {src.base}",
+        f"# Source: {src.label} ({chat_name}), scraped {scraped_date}",
         f"# Speakers ({len(speakers)}): {', '.join(speakers)}",
     ]
     for name in sorted(roles):
@@ -340,7 +373,7 @@ def _sec_of_day(ms: int, tz: tzinfo) -> int:
 
 
 def render_sidecar(group: dict, messages: dict[int, tuple[str, str]], names: dict[str, str],
-                   roles: dict[str, str], tz: tzinfo, scraped_at: str) -> dict:
+                   roles: dict[str, str], tz: tzinfo, scraped_at: str, src: Source = TEAMS) -> dict:
     order = sorted(messages)
     speakers = {s for s, _ in messages.values()}
     segs = []
@@ -349,12 +382,12 @@ def render_sidecar(group: dict, messages: dict[int, tuple[str, str]], names: dic
         t = _sec_of_day(ms, tz)
         segs.append({"start": t, "end": t, "speaker": spk, "epoch_ms": ms, "mid": str(ms), "text": text})
     return {
-        "base": BASE,
+        "base": src.base,
         "source": {
-            "kind": KIND, "platform": "microsoft-teams", "surface": "web",
+            "kind": src.kind, "platform": src.platform, "surface": "web",
             "chat_name": group["chat_name"], "chat_id": group["chat_id"], "url": group["url"],
             "day": group["day"], "message_count": len(messages),
-            "scraped_at": scraped_at, "scraper": SCRAPER,
+            "scraped_at": scraped_at, "scraper": src.scraper,
             "creation_time": utc_iso(order[0]),
         },
         "names": dict(sorted(names.items())),
@@ -366,16 +399,20 @@ def render_sidecar(group: dict, messages: dict[int, tuple[str, str]], names: dic
 # ---- ingest -----------------------------------------------------------------------------
 
 def ingest(export: str | os.PathLike, ws: str | os.PathLike, *, tz_flag: str | None = None,
-           self_name: str | None = None, dry_run: bool = False, now: datetime | None = None) -> list[dict]:
+           self_name: str | None = None, dry_run: bool = False, now: datetime | None = None,
+           src: Source = TEAMS) -> list[dict]:
     """Returns one result per folder: {folder, chat, total, new, written}."""
     ws = Path(ws)
     if not ws.is_dir():
         raise TeamsError(f"workspace {ws} is not a directory")
     records = load_export(export)
     cfg = wsconfig.load_config(ws)
-    teams_cfg = cfg.get("teams") if isinstance(cfg.get("teams"), dict) else {}
-    name_map = {str(k): str(v) for k, v in (teams_cfg.get("names") or {}).items()}
-    toml_roles = {str(k): str(v) for k, v in (teams_cfg.get("roles") or {}).items()}
+    # [teams.*] is the shared people map; a source's own table ([outlook.names]) wins over it.
+    name_map, toml_roles = {}, {}
+    for table in dict.fromkeys(("teams", src.cfg)):
+        t = cfg.get(table) if isinstance(cfg.get(table), dict) else {}
+        name_map.update({str(k): str(v) for k, v in (t.get("names") or {}).items()})
+        toml_roles.update({str(k): str(v) for k, v in (t.get("roles") or {}).items()})
     tz = resolve_tz(tz_flag, cfg)
     reg_roles = registry_roles()
     now = now or datetime.now(timezone.utc)
@@ -384,8 +421,8 @@ def ingest(export: str | os.PathLike, ws: str | os.PathLike, *, tz_flag: str | N
 
     results, reserved = [], set()
     for g in group_chat_days(records, tz, name_map):
-        folder = find_existing(ws, g)
-        old_sc = read_sidecar(folder) if folder else None
+        folder = find_existing(ws, g, src)
+        old_sc = read_sidecar(folder, src) if folder else None
         merged = existing_messages(old_sc)
         known = set(merged)
         merged.update(g["messages"])
@@ -404,10 +441,10 @@ def ingest(export: str | os.PathLike, ws: str | os.PathLike, *, tz_flag: str | N
         roles = {k: v for k, v in sorted(roles.items()) if k in speakers}
         if not dry_run:
             folder.mkdir(parents=True, exist_ok=True)
-            sidecar = render_sidecar(g, merged, names, roles, tz, scraped_at)
-            (folder / SPEAKERS_NAME).write_text(
-                render_speakers(g["chat_name"], scraped_date, merged, roles, tz), encoding="utf-8")
-            (folder / SIDECAR_NAME).write_text(
+            sidecar = render_sidecar(g, merged, names, roles, tz, scraped_at, src)
+            (folder / src.speakers_name).write_text(
+                render_speakers(g["chat_name"], scraped_date, merged, roles, tz, src), encoding="utf-8")
+            (folder / src.sidecar_name).write_text(
                 json.dumps(sidecar, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         results.append({"folder": folder.name, "chat": g["chat_name"], "total": len(merged),
                         "new": new, "written": not dry_run})
@@ -417,8 +454,10 @@ def ingest(export: str | os.PathLike, ws: str | os.PathLike, *, tz_flag: str | N
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="teams_chat.py", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    pi = sub.add_parser("ingest", help="ingest a Teams chat export into a workspace")
-    pi.add_argument("export", help="JSON hand-off file from the Teams scraper")
+    pi = sub.add_parser("ingest", help="ingest a Teams chat or Outlook mail export into a workspace")
+    pi.add_argument("export", help="JSON hand-off file from the Teams or Outlook scraper")
+    pi.add_argument("--source", choices=sorted(SOURCES), default="teams",
+                    help="which scraper produced the export (default: teams)")
     pi.add_argument("--into", required=True, metavar="WS", help="workspace directory")
     pi.add_argument("--tz", default=None, help="IANA zone for chat-days (default: whosaid.toml [workspace].tz, else system)")
     pi.add_argument("--self", dest="self_name", default=None, metavar="NAME",
@@ -427,9 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     try:
         results = ingest(args.export, args.into, tz_flag=args.tz, self_name=args.self_name,
-                         dry_run=args.dry_run)
+                         dry_run=args.dry_run, src=SOURCES[args.source])
     except TeamsError as e:
-        print(f"whosaid: teams ingest: {e}", file=sys.stderr)
+        print(f"whosaid: {args.source} ingest: {e}", file=sys.stderr)
         return 1
     for r in results:
         print(f"{r['folder']}  {r['chat']}  {r['total']} messages ({r['new']} new)")

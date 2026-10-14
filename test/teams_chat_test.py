@@ -334,6 +334,37 @@ def run(tmp: Path) -> None:
                         capture_output=True, text=True, env=cli_env, cwd=REPO)
     check(rr.returncode == 0 and len(rr.stdout.strip().splitlines()) == 2, (rr.returncode, rr.stderr, rr.stdout))
 
+    # ---- (h) outlook source profile: same ingest, outlook.* files and kind, [outlook.names] over [teams.names]
+    mail = {"Widget rollout": {"chat": "Widget rollout", "chat_id": "conv-1", "harvested": 2, "kept": 2,
+                               "reachedCutoff": False, "messages": [
+        rec("Widget rollout", "Help Desk", T_A1, "Your request WID-1 has been logged.", chat_id="conv-1", msg_id="m1"),
+        rec("Widget rollout", DOE, T_A2, "License has been assigned.", chat_id="conv-1", msg_id="m2")]}}
+    mexp = write_export(tmp, mail, "raw_by_thread.json")
+    ws_mail = fresh(tmp, "ws-mail", '[search]\nembed = false\n[teams.names]\n"Doe, Jane (Vendor, consultant)" = "Doe Jane"\n'
+                                    '[outlook.names]\n"Help Desk" = "Help_Desk"\n[outlook.roles]\n"Help_Desk" = "external"\n')
+    teams_chat.ingest(export, ws_mail, tz_flag=TZ)                         # a teams chat-day alongside
+    mres = teams_chat.ingest(mexp, ws_mail, tz_flag=TZ, self_name=SELF, src=teams_chat.OUTLOOK)
+    check(len(mres) == 1 and mres[0]["total"] == 2, mres)
+    mdir = ws_mail / mres[0]["folder"]
+    check((mdir / "outlook.speakers.txt").is_file() and not (mdir / "teams.speakers.txt").exists(), sorted(os.listdir(mdir)))
+    msc = json.loads((mdir / "outlook.diarization.json").read_text(encoding="utf-8"))
+    check(msc["base"] == "outlook" and msc["source"]["kind"] == "outlook-mail", msc["source"])
+    check(msc["source"]["platform"] == "microsoft-outlook" and msc["source"]["chat_id"] == "conv-1", msc["source"])
+    check(msc["roles"] == {"Help_Desk": "external"}, msc["roles"])
+    mtxt = (mdir / "outlook.speakers.txt").read_text(encoding="utf-8")
+    check("# Source: ms-outlook-mail (Widget rollout)" in mtxt, mtxt)
+    turns = wsconfig.parse_turns(mtxt)
+    check([t.speaker for t in turns] == ["Help_Desk", "Doe Jane"], turns)
+    # re-ingest is idempotent and never adopts a teams folder for the same day
+    again = teams_chat.ingest(mexp, ws_mail, tz_flag=TZ, self_name=SELF, src=teams_chat.OUTLOOK)
+    check(again[0]["folder"] == mres[0]["folder"] and again[0]["new"] == 0, again)
+    # the real CLI: `whosaid outlook ingest`
+    ws_mcli = fresh(tmp, "ws-mail-cli", "[search]\nembed = false\n")
+    mr = subprocess.run([str(REPO / "whosaid"), "outlook", "ingest", str(mexp), "--into", str(ws_mcli), "--tz", TZ],
+                        capture_output=True, text=True, env=cli_env, cwd=REPO)
+    check(mr.returncode == 0 and "Widget rollout  2 messages (2 new)" in mr.stdout, (mr.returncode, mr.stderr, mr.stdout))
+    check(any(ws_mcli.glob("*/outlook.speakers.txt")), sorted(map(str, ws_mcli.rglob("*"))))
+
 
 if __name__ == "__main__":
     main()

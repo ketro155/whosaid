@@ -210,6 +210,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus", ".webm"}
+# Text-only sidecar source kinds (lib/teams_chat.py): no audio, no plain .txt expected.
+TEXT_KINDS = frozenset({"teams-chat", "outlook-mail"})
 # Meeting folder names: YYYY-MM-DD-HHMM, or that plus a numeric collision
 # suffix (-2, -3, ...) appended by the bash ingest side when the plain dated
 # folder already holds a different recording.
@@ -1179,20 +1181,20 @@ def render_index(ws: Path, meetings: list[Meeting], orphans: list[str], stale: l
     for m in meetings:
         lines.append(
             f"| {m.folder} | {m.created or '—'} | {hms(m.duration_s)} | "
-            f"{'yes' if m.has_txt else ('n/a' if m.kind == 'teams-chat' else 'NO')} | "
+            f"{'yes' if m.has_txt else ('n/a' if m.kind in TEXT_KINDS else 'NO')} | "
             f"{'yes' if m.has_speakers else 'NO'} | "
             f"{'yes' if m.has_action_items else '—'} |"
         )
     lines += ["", "## Audit", ""]
     problems = 0
     for m in meetings:
-        chat = m.kind == "teams-chat"   # text-only source: no audio, no plain transcript .txt
+        chat = m.kind in TEXT_KINDS   # text-only source: no audio, no plain transcript .txt
         missing = [name for name, ok in (
             ("transcript .txt", m.has_txt or chat), ("speakers .speakers.txt", m.has_speakers),
             ("action-items.md", m.has_action_items),
         ) if not ok]
         if chat:
-            lines.append(f"- {m.folder}: teams-chat (text-only; no source audio or plain .txt expected)"
+            lines.append(f"- {m.folder}: {m.kind} (text-only; no source audio or plain .txt expected)"
                          + (f"  MISSING: {', '.join(missing)}" if missing else "  ok"))
             problems += bool(missing)
             continue
