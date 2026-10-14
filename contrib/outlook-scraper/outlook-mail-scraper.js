@@ -49,6 +49,9 @@
   const CUTOFF_DAYS = Number(window.__OS_CUTOFF_DAYS ?? 7);
   const CUTOFF_MS   = Date.now() - CUTOFF_DAYS * 24 * 60 * 60 * 1000;
   const MAX_CONVS   = Number(window.__OS_MAX_CONVS ?? 200);   // hard ceiling per run
+  // Optional regex source; rows whose aria-label (sender, subject, preview) match are
+  // skipped without opening them, e.g. "Azure DevOps|noreply@" for notification mail.
+  const SKIP_RE     = window.__OS_SKIP_ROW ? new RegExp(window.__OS_SKIP_ROW, 'i') : null;
   const PANE_WAIT_MS = 8000;  // max wait for a clicked thread to render
   const SETTLE_MS   = 400;
   const OLD_STOP    = 15;     // stop after this many consecutive rows older than the cutoff
@@ -171,7 +174,7 @@
   async function run() {
     const os = window.__os;
     os.done = false; os.error = null; os.result = {};
-    os.progress = { phase: 'walking', seen: 0, opened: 0, skippedOld: 0, failed: 0 };
+    os.progress = { phase: 'walking', seen: 0, opened: 0, skippedOld: 0, skippedMatch: 0, failed: 0 };
     try {
       if (!listRows().length) throw new Error('no message list rows: open a folder or run a search first');
       const scroller = listScroller();
@@ -202,6 +205,7 @@
           continue;
         }
         oldRun = 0;
+        if (SKIP_RE && SKIP_RE.test(label)) { os.progress.skippedMatch++; continue; }
         const prev = document.querySelector('[id^="CONV_"][id$="_SUBJECT"]');
         row.scrollIntoView({ block: 'nearest' });
         row.click();

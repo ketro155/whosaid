@@ -12,12 +12,14 @@ offline and only reads that JSON.
    keypress (OWA ignores synthetic key events, so the scraper does not type the
    search for you; over CDP use `Input.insertText` plus `Input.dispatchKeyEvent`).
 2. Optionally set `window.__OS_CUTOFF_DAYS = 30` (default 7) and
-   `window.__OS_MAX_CONVS = 100` (default 200).
+   `window.__OS_MAX_CONVS = 100` (default 200). `window.__OS_SKIP_ROW` takes a
+   regex source; rows whose label (sender, subject, preview) match are skipped
+   unopened, e.g. `"Azure DevOps|noreply@"` for notification mail.
 3. Evaluate the whole file in the tab. It installs `window.__os` and starts
    walking the message list without waiting for it to finish.
 4. Poll with short calls until `window.__os.done` is `true`, watching
    `JSON.stringify(window.__os.progress)` (`opened`, `seen`, `skippedOld`,
-   `failed`). A non-null `window.__os.error` means the walk failed.
+   `skippedMatch`, `failed`). A non-null `window.__os.error` means the walk failed.
 5. Save `JSON.stringify(window.__os.result)` and ingest it:
 
 ```bash
