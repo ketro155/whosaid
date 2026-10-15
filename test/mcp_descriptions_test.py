@@ -258,9 +258,11 @@ def main() -> None:
     check(set(dumps["whosaid_item"]["inputSchema"].get("required", [])) == {"id"}, "item requires id")
     check(set(dumps["whosaid_items"]["inputSchema"]["properties"]) == {"owner", "requester", "status", "type", "workspace"}, "items filters")
     check(set(dumps["whosaid_person"]["inputSchema"].get("required", [])) == set(), "person name is optional")
-    for name in ("whosaid_prs", "whosaid_speakers", "whosaid_workspace_status"):
-        check(set(dumps[name]["inputSchema"]["properties"]) == {"workspace"}, f"{name} takes only workspace")
-    check(set(dumps["whosaid_meetings"]["inputSchema"]["properties"]) == {"workspace", "kind"}, "meetings takes workspace + kind")
+    check(set(dumps["whosaid_workspace_status"]["inputSchema"]["properties"]) == {"workspace"}, "workspace_status takes only workspace")
+    for name in ("whosaid_prs", "whosaid_speakers"):
+        check(set(dumps[name]["inputSchema"]["properties"]) == {"workspace", "limit", "offset"}, f"{name} pages")
+    check(set(dumps["whosaid_meetings"]["inputSchema"]["properties"])
+          == {"workspace", "kind", "since", "until", "query", "limit", "offset", "compact"}, "meetings filters + paging")
     check("teams-chat" in dumps["whosaid_meetings"]["description"], "meetings description names the teams-chat kind")
 
     # --- whosaid_reprocess: mutating, dry run by default ---

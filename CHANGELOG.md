@@ -4,6 +4,18 @@ All notable changes to whosaid are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and the format of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **`whosaid_meetings`, `whosaid_prs` and `whosaid_speakers` page their results (#90).** A
+  ~300-entry workspace made `whosaid_meetings` return ~82k characters, past the MCP client's
+  tool-result limit. All three now take `limit` / `offset` and, with neither, return the first
+  50 rows plus `total` / `omitted` and a paging hint (the `whosaid_worklist` pattern from #30).
+  `whosaid_meetings` also sorts newest first and adds `since` / `until` (YYYY-MM-DD, inclusive),
+  `query` (substring of folder or source name) and `compact` (folder, kind, created, minutes).
+  On that workspace the default call drops to ~14k characters (~7k compact).
+
 ## [1.13.4] - 2026-10-07
 
 ### Added

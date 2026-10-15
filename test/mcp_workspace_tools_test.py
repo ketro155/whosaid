@@ -381,6 +381,64 @@ def test_worklist(ws: Path, fake: FakeRunner) -> None:
     check(out["ok"] is False and len(fake.calls) == before, "bad workspace never reaches the runner")
 
 
+def test_list_paging(ws: Path, fake: FakeRunner) -> None:
+    """meetings/prs/speakers: newest-first order, filters, limit/offset/compact and the
+    50-row default cap (GitHub issue #90)."""
+    w = str(ws.resolve())
+    rows = [{"folder": f"2026-01-{d:02d}-0900", "source_name": f"call {d}.m4a",
+             "created": f"2026-01-{d:02d}T09:00:00Z", "duration_s": 60.0, "minutes": 1,
+             "dated": True, "has_action_items": False, "segments": 3, "kind": "audio"}
+            for d in (3, 1, 5, 2, 4)]
+    rows.append({"folder": "Standup notes", "source_name": "notes.txt", "created": None,
+                 "duration_s": None, "minutes": None, "dated": False, "has_action_items": False,
+                 "segments": 1, "kind": "audio"})
+
+    fake.queue.append((rows, None))
+    out = mcp_server.whosaid_meetings(kind="audio")
+    check(fake.last()[1] == ["meetings", w, "--kind", "audio"], f"kind still goes to the CLI: {fake.last()[1]}")
+    check([m["folder"] for m in out["meetings"]] == [
+        "2026-01-05-0900", "2026-01-04-0900", "2026-01-03-0900", "2026-01-02-0900", "2026-01-01-0900",
+        "Standup notes"], f"newest first, undated last: {out['meetings']}")
+    check(out["total"] == 6 and out["count"] == 6 and out["limit"] == 50 and "omitted" not in out, f"fits: {out}")
+
+    fake.queue.append((rows, None))
+    out = mcp_server.whosaid_meetings(since="2026-01-02", until="2026-01-04")
+    check([m["folder"] for m in out["meetings"]] == ["2026-01-04-0900", "2026-01-03-0900", "2026-01-02-0900"],
+          f"since/until inclusive, undated dropped: {out['meetings']}")
+
+    fake.queue.append((rows, None))
+    out = mcp_server.whosaid_meetings(query="NOTES")
+    check([m["folder"] for m in out["meetings"]] == ["Standup notes"], f"query matches source_name: {out}")
+
+    fake.queue.append((rows, None))
+    out = mcp_server.whosaid_meetings(limit=2, offset=1, compact=True)
+    check([m["folder"] for m in out["meetings"]] == ["2026-01-04-0900", "2026-01-03-0900"], f"page: {out}")
+    check(out["omitted"] == 3 and "offset=3" in out["hint"] and out["offset"] == 1, f"omitted/hint: {out}")
+    check(out["compact"] is True and set(out["meetings"][0]) == {"folder", "kind", "created", "minutes"},
+          f"compact keys: {out['meetings'][0]}")
+
+    for bad in ({"since": "Jan 2"}, {"until": "2026-1-2"}, {"limit": 0}, {"offset": -1}, {"limit": "x"}):
+        n = len(fake.calls)
+        out = mcp_server.whosaid_meetings(**bad)
+        check(out["ok"] is False and len(fake.calls) == n, f"{bad} must error before shelling: {out}")
+
+    # the default cap: 120 rows -> newest 50 plus omitted/hint; prs and speakers page the same way
+    many = [{"folder": f"2026-03-{i // 4 + 1:02d}-{i:04d}", "created": None, "kind": "teams-chat"} for i in range(120)]
+    fake.queue.append((many, None))
+    out = mcp_server.whosaid_meetings()
+    check(out["count"] == 50 and out["total"] == 120 and out["omitted"] == 70, f"default cap: {out['count']}")
+    check(out["meetings"][0]["folder"] == "2026-03-30-0119", f"dated folder names sort too: {out['meetings'][0]}")
+    for fn, key in ((mcp_server.whosaid_prs, "prs"), (mcp_server.whosaid_speakers, "speakers")):
+        fake.queue.append(([{"x": i} for i in range(120)], None))
+        out = fn()
+        check(out["count"] == 50 and out["omitted"] == 70 and out[key][0] == {"x": 0}, f"{key} default cap: {out['count']}")
+        fake.queue.append(([{"x": i} for i in range(120)], None))
+        out = fn(limit=10, offset=110)
+        check([r["x"] for r in out[key]] == list(range(110, 120)) and "omitted" not in out, f"{key} last page")
+        n = len(fake.calls)
+        check(fn(limit=0)["ok"] is False and len(fake.calls) == n, f"{key} limit=0 errors")
+
+
 def test_worklist_paging(ws: Path, fake: FakeRunner) -> None:
     """tier/limit/offset/compact + the 50-item default cap (GitHub issue #30)."""
     w = str(ws.resolve())
@@ -934,6 +992,7 @@ def main() -> None:
             test_workspace_status(ws, fake)
             test_worklist(ws, fake)
             test_worklist_paging(ws, fake)
+            test_list_paging(ws, fake)
 
             mcp_server._run_ws = real_runner
             clear_env()

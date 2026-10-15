@@ -1124,6 +1124,11 @@ _WORKLIST_TIERS = ("P1", "P2", "P3")
 # reporting the rest via "omitted"/"hint" instead of dumping everything.
 _WORKLIST_DEFAULT_LIMIT = 50
 _WORKLIST_COMPACT_KEYS = ("id", "source", "text", "tier", "score", "why")
+# GitHub issue #90: a ~300-entry workspace made whosaid_meetings ~82k chars, past the
+# same limit, so the list tools page the same way (newest meetings first).
+_LIST_DEFAULT_LIMIT = 50
+_MEETINGS_COMPACT_KEYS = ("folder", "kind", "created", "minutes")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _read_only() -> ToolAnnotations:
@@ -1272,19 +1277,25 @@ _DESC_WS_MEETINGS = (
     "for a Microsoft Teams chat folder, \"audio\" for a recorded meeting; pass kind to filter). "
     "The folder names are what whosaid_search "
     "hits carry, what whosaid_context takes, and what the "
-    "whosaid://workspace/meeting/{folder}/... resources use. Read-only."
+    "whosaid://workspace/meeting/{folder}/... resources use. Newest first. Filter with kind, "
+    "since/until (YYYY-MM-DD, inclusive, on the meeting date) and query (case-insensitive "
+    "substring of folder or source name), then page with offset (skip N) and limit (top N); "
+    "compact=true keeps only folder, kind, created and minutes. A call with neither limit nor "
+    "offset returns the newest 50 plus total/omitted and a paging hint. Read-only."
 )
 
 _DESC_WS_PRS = (
     "List pull-request mentions found in the transcripts: PR numbers or links, who mentioned "
     "them, in which meeting and when. Read-only. Keywords: PR, pull request, code review, "
-    "merged, deployed."
+    "merged, deployed. Page with offset/limit; a call with neither returns the first 50 plus "
+    "total/omitted and a paging hint."
 )
 
 _DESC_WS_SPEAKERS = (
     "List every speaker label in the search index with turn counts and the meetings they "
     "appear in. Use the exact labels as the `speaker` filter of whosaid_search or the `name` "
-    "of whosaid_person. Read-only."
+    "of whosaid_person. Busiest first; page with offset/limit; a call with neither returns "
+    "the top 50 plus total/omitted and a paging hint. Read-only."
 )
 
 _DESC_WS_WORKLIST = (
@@ -1493,43 +1504,131 @@ def whosaid_person(
 # ---------------------------------------------------------------------------
 # 12) whosaid_meetings, 13) whosaid_prs, 14) whosaid_speakers
 # ---------------------------------------------------------------------------
+def _page_args(limit, offset) -> tuple[Optional[int], int, Optional[dict]]:
+    """Validate limit/offset the way whosaid_worklist does; returns (limit, offset, error)."""
+    try:
+        limit = None if limit is None else int(limit)
+    except (TypeError, ValueError):
+        return None, 0, _ws_error(f"invalid limit '{limit}'", "pass a whole number >= 1")
+    if limit is not None and limit < 1:
+        return None, 0, _ws_error(f"limit must be >= 1, got {limit}", "pass limit=N to cap the page size")
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        return None, 0, _ws_error(f"invalid offset '{offset}'", "pass a whole number >= 0")
+    if offset < 0:
+        return None, 0, _ws_error(f"offset must be >= 0, got {offset}", "offset is a skip count; 0 is the first page")
+    return limit, offset, None
+
+
+def _paged(out: dict, key: str, rows: list, limit: Optional[int], offset: int) -> dict:
+    """Slice rows into out[key] with count/total, self-capping at _LIST_DEFAULT_LIMIT when
+    neither limit nor offset was given, and add omitted/hint when rows were held back."""
+    total = len(rows)
+    if limit is None and offset == 0:
+        limit = _LIST_DEFAULT_LIMIT
+    rows = rows[offset:]
+    if limit is not None:
+        rows = rows[:limit]
+    out.update({key: rows, "count": len(rows), "total": total})
+    if limit is not None:
+        out["limit"] = limit
+    if offset:
+        out["offset"] = offset
+    omitted = total - (offset + len(rows))
+    if omitted > 0:
+        out["omitted"] = omitted
+        out["hint"] = f"more remain: pass offset={offset + len(rows)} (or limit) to page"
+    return out
+
+
+def _meeting_day(m: dict) -> str:
+    """YYYY-MM-DD for a meeting row: its created stamp, else a dated folder name, else ''."""
+    for v in (m.get("created"), m.get("folder")):
+        day = str(v or "")[:10]
+        if _DATE_RE.match(day):
+            return day
+    return ""
+
+
 @mcp.tool(name="whosaid_meetings", description=_DESC_WS_MEETINGS, annotations=_read_only())
-def whosaid_meetings(workspace: Optional[str] = None, kind: Optional[str] = None) -> dict:
-    """Shell `graph.py meetings <ws> [--kind K] --json` and return {"ok", "meetings": [...], "count"}."""
+def whosaid_meetings(
+    workspace: Optional[str] = None,
+    kind: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    query: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    compact: bool = False,
+) -> dict:
+    """Shell `graph.py meetings <ws> [--kind K] --json` and return {"ok", "meetings": [...],
+    "count", "total"} plus "omitted"/"hint" when rows were held back. Rows are sorted newest
+    first (created, else a dated folder name; undated rows last), filtered by since/until
+    (inclusive, on that day; undated rows drop out) and query, then offset skips and limit
+    caps; with neither, the response self-caps at _LIST_DEFAULT_LIMIT (GitHub issue #90).
+    """
     ws, err = _resolve_ws(workspace)
+    if err:
+        return err
+    for name, val in (("since", since), ("until", until)):
+        if val is not None and not _DATE_RE.match(str(val).strip()):
+            return _ws_error(f"invalid {name} '{val}'", "pass a date as YYYY-MM-DD")
+    since = since.strip() if since else None
+    until = until.strip() if until else None
+    limit, offset, err = _page_args(limit, offset)
     if err:
         return err
     payload, err = _run_ws(GRAPH_PY, ["meetings", ws] + (["--kind", kind] if kind else []), ws)
     if err:
         return err
-    meetings = _as_list(payload, "meetings")
-    return {"ok": True, "workspace": str(ws), "meetings": meetings, "count": len(meetings)}
+    meetings = [m for m in _as_list(payload, "meetings") if isinstance(m, dict)]
+    meetings.sort(key=lambda m: (_meeting_day(m) != "", str(m.get("created") or _meeting_day(m)),
+                                  str(m.get("folder") or "")), reverse=True)
+    if since or until:
+        meetings = [m for m in meetings if _meeting_day(m)
+                    and (not since or _meeting_day(m) >= since) and (not until or _meeting_day(m) <= until)]
+    q = (query or "").strip().lower()
+    if q:
+        meetings = [m for m in meetings
+                    if q in str(m.get("folder") or "").lower() or q in str(m.get("source_name") or "").lower()]
+    out = _paged({"ok": True, "workspace": str(ws)}, "meetings", meetings, limit, offset)
+    if compact:
+        out["meetings"] = [{k: m.get(k) for k in _MEETINGS_COMPACT_KEYS} for m in out["meetings"]]
+        out["compact"] = True
+    return out
 
 
 @mcp.tool(name="whosaid_prs", description=_DESC_WS_PRS, annotations=_read_only())
-def whosaid_prs(workspace: Optional[str] = None) -> dict:
-    """Shell `graph.py prs <ws> --json` and return {"ok", "prs": [...], "count"}."""
+def whosaid_prs(workspace: Optional[str] = None, limit: Optional[int] = None, offset: int = 0) -> dict:
+    """Shell `graph.py prs <ws> --json` and return {"ok", "prs": [...], "count", "total"},
+    paged like whosaid_meetings (GitHub issue #90)."""
     ws, err = _resolve_ws(workspace)
+    if err:
+        return err
+    limit, offset, err = _page_args(limit, offset)
     if err:
         return err
     payload, err = _run_ws(GRAPH_PY, ["prs", ws], ws)
     if err:
         return err
-    prs = _as_list(payload, "prs")
-    return {"ok": True, "workspace": str(ws), "prs": prs, "count": len(prs)}
+    return _paged({"ok": True, "workspace": str(ws)}, "prs", _as_list(payload, "prs"), limit, offset)
 
 
 @mcp.tool(name="whosaid_speakers", description=_DESC_WS_SPEAKERS, annotations=_read_only())
-def whosaid_speakers(workspace: Optional[str] = None) -> dict:
-    """Shell `search.py speakers <ws> --json` and return {"ok", "speakers": [...], "count"}."""
+def whosaid_speakers(workspace: Optional[str] = None, limit: Optional[int] = None, offset: int = 0) -> dict:
+    """Shell `search.py speakers <ws> --json` and return {"ok", "speakers": [...], "count",
+    "total"}, paged like whosaid_meetings (GitHub issue #90)."""
     ws, err = _resolve_ws(workspace)
+    if err:
+        return err
+    limit, offset, err = _page_args(limit, offset)
     if err:
         return err
     payload, err = _run_ws(SEARCH_PY, ["speakers", ws], ws)
     if err:
         return err
-    speakers = _as_list(payload, "speakers")
-    return {"ok": True, "workspace": str(ws), "speakers": speakers, "count": len(speakers)}
+    return _paged({"ok": True, "workspace": str(ws)}, "speakers", _as_list(payload, "speakers"), limit, offset)
 
 
 # ---------------------------------------------------------------------------
