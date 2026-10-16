@@ -130,6 +130,27 @@ def test_json_and_drift():
         check(ch.drift(p, random.Random(9))["codec"] == codec, f"drift keeps {codec}")
 
 
+def test_device_switch():
+    x = noise(1.0)
+    for seed in range(12):
+        for codec in ch.CODECS:
+            p = profile_for(codec, seed)
+            # switch_p=0 consumes the rng exactly like the old drift
+            check(ch.drift(p, random.Random(seed), 1.0, 0.0) == ch.drift(p, random.Random(seed), 1.0),
+                  "switch_p=0 unchanged")
+            d = ch.drift(p, random.Random(seed), 1.0, 1.0)
+            check(d.get("device_switch") is True and d["kind"] == "remote", "switch_p=1 switches a remote voice")
+            check(d["codec"] != p["codec"] and d["codec"] in ch.CODECS, f"switch leaves {codec}")
+            check(-12.0 <= d["level_db"] <= -3.0, "switched level in range")
+            check(json.loads(json.dumps(d)) == d, "switched profile is JSON-safe")
+            check(len(ch.apply(x, d)) == len(x), "switched profile applies")
+        loc = ch.local_profile(random.Random(seed))
+        check(not ch.drift(loc, random.Random(seed), 1.0, 1.0).get("device_switch"), "local never switches")
+    hits = sum(bool(ch.drift(profile_for("opus", 3), random.Random(k), 1.0, 0.25).get("device_switch"))
+               for k in range(400))
+    check(60 <= hits <= 140, f"switch rate ~25% ({hits}/400)")
+
+
 def test_tempo():
     x = noise(5.0)
     y = ch.tempo(x, 1.05)
@@ -156,6 +177,7 @@ def main():
     test_hf()
     test_determinism()
     test_json_and_drift()
+    test_device_switch()
     test_tempo()
     test_speed()
     print(f"PASS: {CHECKS} assertions")

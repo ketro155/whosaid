@@ -34,6 +34,14 @@ import realistic_plan  # noqa: E402
 SR = 16000
 ENROLL_SECONDS = 60.0
 CACHE_BYTES = 256 * 1024 * 1024
+# P(a remote speaker's later epoch is on another device), see channel.device_switch.
+# Parameter drift alone moves whosaid's embedding by ~0.01 cosine, too little to
+# split a cluster; a device change gives the 0.70-0.83 second clusters real
+# meetings show (#80).
+DEVICE_SWITCH_P = 0.25
+# P(a remote speaker's enrollment clip was recorded on another device than their
+# usual one in this meeting), as when a voiceprint comes from an earlier call.
+ENROLL_SWITCH_P = 0.3
 
 
 def derive(*parts):
@@ -178,8 +186,22 @@ def build_phrase_text(voices):
     return out
 
 
-def render_audio(plan, pool_root, base_profiles, clips):
-    """Mix every speaker's epochs. Returns the int16-range float32 mix."""
+def epoch_profiles(plan, base_profiles, switch_p=DEVICE_SWITCH_P):
+    """{vid: [profile per epoch]}: epoch 0 is the base, later epochs drift (and may
+    switch device). Deterministic from each epoch's drift_seed."""
+    out = {}
+    for sp in plan["speakers"]:
+        vid = sp["voice"]
+        out[vid] = [base_profiles[vid] if k == 0 else channel.drift(
+            base_profiles[vid], random.Random(ep["drift_seed"]), 1.0, switch_p)
+            for k, ep in enumerate(plan["epochs"][vid])]
+    return out
+
+
+def render_audio(plan, pool_root, base_profiles, clips, profiles=None):
+    """Mix every speaker's epochs. Returns the int16-range float32 mix. `profiles`
+    ({vid: [per-epoch profile]}) defaults to epoch_profiles(plan, base_profiles)."""
+    profiles = profiles or epoch_profiles(plan, base_profiles)
     n = int(round(plan["duration"] * SR))
     mix = np.zeros(n, dtype=np.float32)
     by_speaker = {}
@@ -209,8 +231,7 @@ def render_audio(plan, pool_root, base_profiles, clips):
             span = np.zeros(s1 - s0, dtype=np.int16)
             for a, x in placed:
                 add_clipped(span, a - s0, x)
-            prof = base_profiles[vid] if k == 0 else channel.drift(
-                base_profiles[vid], random.Random(ep["drift_seed"]))
+            prof = profiles[vid][k]
             out = channel.apply(span, prof)
             m0 = max(s0, 0)
             o = out[m0 - s0:]
@@ -245,7 +266,8 @@ def render_enroll_audio(order, clips, rng):
     return np.concatenate(pieces)[:want]
 
 
-def render_meeting(plan, voices, bank, pool_root, out_dir, clips=None):
+def render_meeting(plan, voices, bank, pool_root, out_dir, clips=None, switch_p=DEVICE_SWITCH_P,
+                   enroll_switch_p=ENROLL_SWITCH_P):
     """Render one planned meeting into out_dir/<id>/. Returns the index entry."""
     mid = plan["id"]
     mdir = os.path.join(out_dir, mid)
@@ -256,7 +278,8 @@ def render_meeting(plan, voices, bank, pool_root, out_dir, clips=None):
         r = random.Random(derive(plan["seed"], mid, sp["voice"], "profile"))
         base[sp["voice"]] = channel.local_profile(r) if sp["channel"] == "local" else channel.remote_profile(r)
 
-    mix = render_audio(plan, pool_root, base, clips)
+    profiles = epoch_profiles(plan, base, switch_p)
+    mix = render_audio(plan, pool_root, base, clips, profiles)
 
     nrng = random.Random(derive(plan["seed"], mid, "noise"))
     snr = round(nrng.uniform(35.0, 45.0), 2)
@@ -275,11 +298,14 @@ def render_meeting(plan, voices, bank, pool_root, out_dir, clips=None):
     used = {(p["clip"], round(p["t0"], 4), round(p["t1"], 4))
             for t in plan["turns"] for p in t["pieces"]}
     enroll_paths = {}
+    enroll_switched = set()
     for sp in plan["speakers"]:
         vid = sp["voice"]
         er = random.Random(derive(plan["seed"], mid, vid, "enroll"))
         raw = render_enroll_audio(enroll_order(vid, bank, used, er), clips, er)
-        prof = channel.drift(base[vid], random.Random(er.getrandbits(48)), 1.0)
+        prof = channel.drift(base[vid], random.Random(er.getrandbits(48)), 1.0, enroll_switch_p)
+        if prof.get("device_switch"):
+            enroll_switched.add(vid)
         e = to_i16(channel.aac_roundtrip(to_i16(channel.apply(raw, prof)), 64))
         p = os.path.abspath(os.path.join(mdir, "enroll", vid + ".wav"))
         write_wav(p, e)
@@ -304,7 +330,11 @@ def render_meeting(plan, voices, bank, pool_root, out_dir, clips=None):
              "speakers": [{"name": sp["name"], "voice": sp["voice"],
                            "enrolled_clip": enroll_paths[sp["voice"]], "gain_db": 0.0,
                            "channel": sp["channel"], "profile": base[sp["voice"]],
-                           "epochs": plan["epochs"][sp["voice"]]} for sp in plan["speakers"]],
+                           "epochs": plan["epochs"][sp["voice"]],
+                           "device_switch_epochs": [k for k, p in enumerate(profiles[sp["voice"]])
+                                                    if p.get("device_switch")],
+                           "enroll_device_switch": sp["voice"] in enroll_switched}
+                          for sp in plan["speakers"]],
              "turns": turns, "overlap_frac": round(overlap_fraction(turns), 4),
              "overlap_target": plan.get("overlap_target"), "noise_snr_db": snr}
     write_atomic(os.path.join(mdir, "truth.json"), json.dumps(truth, indent=1, default=repr) + "\n")
@@ -343,6 +373,10 @@ def main(argv=None):
     ap.add_argument("--blends", type=int, default=0,
                     help="crosstalk episodes per meeting: two speakers trading short overlapping "
                          "turns, the shape that leaves a two-voice cluster (#77)")
+    ap.add_argument("--device-switch", type=float, default=DEVICE_SWITCH_P,
+                    help="P(a remote speaker's later epoch is on another device) (default %(default)s)")
+    ap.add_argument("--enroll-switch", type=float, default=ENROLL_SWITCH_P,
+                    help="P(a remote speaker's enrollment is on another device) (default %(default)s)")
     args = ap.parse_args(argv)
     minutes = parse_range(args.minutes, "--minutes")
     nsp = tuple(int(x) for x in parse_range(args.speakers, "--speakers"))
@@ -357,7 +391,8 @@ def main(argv=None):
         plan = realistic_plan.plan_meeting(rng, voices, bank, minutes=minutes, speakers=nsp,
                                            roster=args.roster, mid="m%d-%03d" % (args.seed, i),
                                            blends=args.blends)
-        e = render_meeting(plan, voices, bank, pool_root, args.out, clips)
+        e = render_meeting(plan, voices, bank, pool_root, args.out, clips, args.device_switch,
+                           args.enroll_switch)
         entries.append(e)
         print("%s  %7.1fs  %2d speakers  %4d turns  %s" % (
             e["id"], e["duration"], e["n_speakers"], e["n_turns"], ",".join(e["tags"])), flush=True)

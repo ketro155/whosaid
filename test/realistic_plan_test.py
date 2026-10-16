@@ -7,7 +7,8 @@ synthetic one (noise bursts separated by silences, written with numpy + wave).
 Covers: phrase_bank splits a 3-burst clip into 3 phrases (and caches it, keyed
 by size + mtime); a 40-min / 8-speaker plan hits the issue's turn-length table
 (+-6 pp), switches/min, overlap, top-speaker share, one local speaker, gap-free
-epochs, determinism, and no same-speaker overlapping turns. Finally plans against
+epochs, determinism, and no same-speaker overlapping turns; the turn-taking knobs
+land on their truth-side targets under calibrate.py's definitions. Finally plans against
 the REAL pool (read-only) for 3 seeds and prints plan_stats (no asserts).
 
 Run:
@@ -215,6 +216,32 @@ def check_blends(voices, bank):
     print("  blends: %d crosstalk turns, %d overlapping hand-offs" % (len(ct), ov))
 
 
+def check_calibrate_view(voices, bank):
+    """The tuned turn-taking knobs, measured with calibrate.py's own definitions
+    (clamped gaps over every segment, overlap over covered time) on truth turns.
+    Truth is planned tighter than the real stats because the diarizer widens gaps
+    and misses part of the overlap; these bands are the truth-side targets that
+    put the diarizer side on the real numbers (#80)."""
+    import calibrate as cb
+    edges = [1, 2, 4, 8]
+    per = []
+    for seed in (7, 8, 9, 10):
+        plan = rp.plan_meeting(random.Random(seed), voices, bank, minutes=(40, 40), speakers=(8, 8),
+                               mid="m%d-000" % seed)
+        segs = [{"start": t["start"], "end": t["end"], "speaker": t["speaker"]} for t in plan["turns"]]
+        per.append(cb.seg_stats(segs, plan["duration"] / 60.0, edges))
+    agg = cb.aggregate_side(per, edges, 0.3)
+    got = {k: agg[k]["value"] for k in ("overlap_share", "gap_median_s", "gap_share_under",
+                                        "switches_per_min", "talk_share_2", "talk_share_4")}
+    print("calibrate view of 4 synthetic plans:", json.dumps({k: round(v, 3) for k, v in got.items()}))
+    assert 0.045 <= got["overlap_share"] <= 0.09, got
+    assert 0.3 <= got["gap_median_s"] <= 0.75, got
+    assert 0.33 <= got["gap_share_under"] <= 0.55, got
+    assert 4.5 <= got["switches_per_min"] <= 7.0, got
+    assert got["talk_share_2"] <= 0.16, got
+    assert got["talk_share_4"] >= 0.42, got
+
+
 def real_pool():
     pj = os.path.expanduser("~/.cache/whosaid/diarize-eval/pool.json")
     if not os.path.exists(pj):
@@ -246,6 +273,7 @@ def main():
         check_plan(voices, bank)
         check_voice_choice(voices, bank)
         check_blends(voices, bank)
+        check_calibrate_view(voices, bank)
     real_pool()
     print("realistic_plan_test: ALL PASS")
 

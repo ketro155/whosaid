@@ -54,6 +54,7 @@ if not os.path.exists(FFMPEG):
 
 CODECS = ("opus", "telephone", "g722")
 CODEC_WEIGHTS = (0.6, 0.25, 0.15)
+SWITCH_WEIGHTS = (0.45, 0.2, 0.35)  # device_switch target family (the current one excluded)
 _TAIL_PAD = 8192  # zeros appended before encoding so the encoder flush is not lost
 
 
@@ -222,8 +223,36 @@ def _nudge(rng, v, spread, lo, hi, strength):
     return min(hi, max(lo, v + rng.uniform(-1.0, 1.0) * spread * strength))
 
 
-def drift(profile: dict, rng: random.Random, strength: float = 1.0) -> dict:
-    """Perturbed copy for a later epoch of the same speaker. Same codec family."""
+def device_switch(profile: dict, rng: random.Random) -> dict:
+    """A remote speaker on another device for one epoch (headset to laptop, app to
+    phone dial-in): a fresh remote profile from a DIFFERENT codec family. Measured
+    with whosaid's embedder on the roster pool (8 s chunks vs a 60 s enrollment
+    through the base profile): same family 0.90, opus->g722 0.83, opus->local-like
+    0.80, opus->telephone 0.67. Real over-split second clusters score 0.70-0.83,
+    and only a change of this size, not parameter drift (0.94-0.95), lands there."""
+    others = [(c, w) for c, w in zip(CODECS, SWITCH_WEIGHTS) if c != profile["codec"]]
+    codec = rng.choices([c for c, _ in others], weights=[w for _, w in others])[0]
+    for _ in range(64):
+        p = remote_profile(rng)
+        if p["codec"] == codec:
+            break
+    p["level_db"] = round(_nudge(rng, profile["level_db"], 3.0, -12.0, -3.0, 1.0), 2)
+    p["device_switch"] = True
+    return p
+
+
+def drift(profile: dict, rng: random.Random, strength: float = 1.0, switch_p: float = 0.0) -> dict:
+    """Perturbed copy for a later epoch of the same speaker. Same codec family,
+    unless `switch_p` > 0: then a remote speaker moves to another device
+    (`device_switch`) with that probability. The switch draw comes after the
+    perturbation draws, so switch_p=0 consumes the rng exactly as before."""
+    p = _drift(profile, rng, strength)
+    if switch_p > 0 and profile["kind"] == "remote" and rng.random() < switch_p:
+        return device_switch(profile, rng)
+    return p
+
+
+def _drift(profile: dict, rng: random.Random, strength: float) -> dict:
     p = copy.deepcopy(profile)
     s = float(strength)
     p["hp_hz"] = round(_nudge(rng, p["hp_hz"], 15.0 if p["kind"] == "remote" else 5.0,

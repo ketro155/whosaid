@@ -38,10 +38,30 @@ PAD = 0.030
 MIN_PHRASE = 0.15
 REUSE_WINDOW = 180.0
 
-# (lo, hi) in seconds; share of turns from issue #80. The last bin is 8-30 s.
+# (lo, hi) in seconds. The last bin is 8-30 s. BIN_TARGETS is the real share of
+# turns from issue #80; BIN_SHARE is what the planner steers to: fewer 2-4 s and
+# more >8 s turns, because the diarizer splits long turns at pauses into 2-4 s pieces.
 BINS = [(0.0, 1.0), (1.0, 2.0), (2.0, 4.0), (4.0, 8.0), (8.0, 30.0)]
-BIN_SHARE = [0.26, 0.18, 0.21, 0.21, 0.14]
+BIN_SHARE = [0.26, 0.18, 0.19, 0.21, 0.16]
 BIN_TARGETS = [0.26, 0.18, 0.21, 0.21, 0.14]
+
+# Turn-taking knobs, set so the DIARIZER's view of a meeting lands on the real stats
+# (calibrate.py). The diarizer trims each turn to its voiced span and misses part
+# of every overlap, so truth is planned tighter than the real numbers. On roster
+# batches it widened the pooled gap median by 0.16-0.26 s, halved the share of
+# gaps under 0.3 s, saw 66-75% of the overlap and cut >8 s talk share by ~9%.
+# Overlap comes mostly from a few long talk-overs of long turns, not from many
+# backchannels: each overlap is also a 0 s gap, so many short ones would drag the
+# gap median far below the real 0.74 s.
+GAP_MEDIAN = 0.9        # lognormal median of a between-speaker gap (s)
+OVERLAP_MEDIAN = 0.07   # median per-meeting overlap target (share of talk)
+OVERLAP_RANGE = (0.012, 0.12)
+LONG_TAIL_MEAN = 5.0    # mean seconds beyond 8.8 s of a >8 s turn
+OV_SWITCH_P = 0.6       # P(a switch starts inside the previous turn) while under target
+OV_SECONDS = (2.5, 7.0)  # length of such an overlap, capped at OV_MAX_FRAC of the previous turn
+OV_MAX_FRAC = 0.6
+OV_MIN_PREV = 3.0       # only a turn at least this long is talked over (while under target)
+BC_P = 0.4              # P(a backchannel over a >= 5 s turn) while under target
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +306,7 @@ def _sample_target(rng, adj=None):
     if b == 0:
         return b, rng.uniform(0.3, 0.92)
     if b == 4:
-        return b, min(28.0, 8.8 + rng.expovariate(1.0 / 4.5))
+        return b, min(28.0, 8.8 + rng.expovariate(1.0 / LONG_TAIL_MEAN))
     w = hi - lo
     return b, rng.uniform(lo + 0.08 * w, hi - 0.12 * w)
 
@@ -406,7 +426,7 @@ def plan_meeting(rng, voices, bank, *, minutes=(30, 120), speakers=(6, 10), rost
     D = rng.uniform(minutes[0], minutes[1]) * 60.0
     if minutes[0] <= 44 <= minutes[1] and rng.random() < 0.5:  # median ~44 min
         D = min(D, rng.uniform(minutes[0], max(minutes[0], 44)) * 60.0)
-    overlap_target = min(0.08, max(0.012, math.exp(rng.gauss(math.log(0.04), 0.4))))
+    overlap_target = min(OVERLAP_RANGE[1], max(OVERLAP_RANGE[0], math.exp(rng.gauss(math.log(OVERLAP_MEDIAN), 0.4))))
     # switches per turn, backchannels included: the real 5.7/min is diarizer output,
     # where every backchannel is a segment of its own
     rate = min(0.44, max(0.32, rng.gauss(0.38, 0.03)))
@@ -511,11 +531,12 @@ def plan_meeting(rng, voices, bank, *, minutes=(30, 120), speakers=(6, 10), rost
                 spk = draw(weights())
             if spk != prev[0]:
                 want_ov = ov_secs < overlap_target * talk_total
-                if rng.random() < (0.22 if want_ov else 0.02):
-                    ov = min(rng.uniform(1.0, 4.0), 0.5 * (prev[2] - prev[1]))
+                long_prev = prev[2] - prev[1] >= OV_MIN_PREV
+                if rng.random() < ((OV_SWITCH_P if long_prev else 0.0) if want_ov else 0.02):
+                    ov = min(rng.uniform(*OV_SECONDS), OV_MAX_FRAC * (prev[2] - prev[1]))
                     start = prev[2] - ov
                 else:
-                    gap = min(6.0, max(0.05, math.exp(rng.gauss(math.log(1.05), 1.0))))
+                    gap = min(6.0, max(0.05, math.exp(rng.gauss(math.log(GAP_MEDIAN), 1.0))))
                     start = prev[2] + gap
             else:
                 start = prev[2] + rng.uniform(0.3, 1.5)
@@ -548,11 +569,11 @@ def plan_meeting(rng, voices, bank, *, minutes=(30, 120), speakers=(6, 10), rost
         talk_total += dur
         last_end[spk] = end
         if prev is not None and prev[0] != spk and start < prev[2]:
-            ov_secs += prev[2] - start
+            ov_secs += min(prev[2], end) - start  # a short turn can end inside the previous one
         # backchannel over a long turn
         if dur >= 5.0:
             want_ov = ov_secs < overlap_target * talk_total
-            if rng.random() < (0.5 if want_ov else 0.03):
+            if rng.random() < (BC_P if want_ov else 0.03):
                 others = [v for v in spk_order if v != spk]
                 ws = [0.0 if v == spk else w for v, w in zip(spk_order, weights(excl=spk))]
                 bv = draw(ws)

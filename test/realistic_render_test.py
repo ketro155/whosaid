@@ -38,7 +38,16 @@ def check(cond, msg):
 fake_channel = types.ModuleType("channel")
 fake_channel.remote_profile = lambda rng: {"kind": "remote", "x": rng.random()}
 fake_channel.local_profile = lambda rng: {"kind": "local", "x": rng.random()}
-fake_channel.drift = lambda profile, rng, strength=1.0: dict(profile, drift=rng.random())
+
+
+def _fake_drift(profile, rng, strength=1.0, switch_p=0.0):
+    d = dict(profile, drift=rng.random())
+    if switch_p > 0 and profile["kind"] == "remote" and rng.random() < switch_p:
+        return {"kind": "remote", "codec": "switched", "device_switch": True, "x": rng.random()}
+    return d
+
+
+fake_channel.drift = _fake_drift
 fake_channel.apply = lambda samples, profile: samples
 fake_channel.tempo = lambda samples, factor: samples  # identity: renderer must pad/trim
 fake_channel.aac_roundtrip = lambda samples, bitrate_k=64: samples
@@ -196,8 +205,13 @@ with tempfile.TemporaryDirectory() as td:
     check(35 <= truth["noise_snr_db"] <= 45, "noise SNR recorded in 35-45 dB")
     check(0.0 < truth["overlap_frac"] < 0.2, "overlap_frac measured: %s" % truth["overlap_frac"])
     for s in truth["speakers"]:
-        for k in ("name", "voice", "enrolled_clip", "gain_db", "channel", "profile", "epochs"):
+        for k in ("name", "voice", "enrolled_clip", "gain_db", "channel", "profile", "epochs",
+                  "device_switch_epochs", "enroll_device_switch"):
             check(k in s, "speaker has " + k)
+        check(all(0 < k < len(s["epochs"]) for k in s["device_switch_epochs"]),
+              "device switches only on later epochs")
+        if s["channel"] == "local":
+            check(not s["device_switch_epochs"] and not s["enroll_device_switch"], "local voice never switches")
         check(os.path.isabs(s["enrolled_clip"]) and os.path.exists(s["enrolled_clip"]),
               "enrolled_clip is an existing absolute path")
         # run.py: os.path.join(pool_root, abs) must be unchanged
@@ -221,6 +235,26 @@ with tempfile.TemporaryDirectory() as td:
     segs = [{"start": t["start"], "end": t["end"], "speaker": t["speaker"]} for t in truth["turns"]]
     res = score_meeting(truth, segs, "named", enrolled=sorted(names), hyp_text="x")
     check(res["der"] is not None and res["der"] < 0.05, "score_meeting accepts truth (der=%s)" % res["der"])
+
+    # ---- device switches: epoch_profiles ------------------------------------------
+    base = {sp["voice"]: s["profile"] for sp, s in zip(plan["speakers"], truth["speakers"])}
+    plan2 = json.loads(json.dumps(plan))
+    for v in plan2["epochs"]:
+        plan2["epochs"][v] = [dict(plan2["epochs"][v][0], end=90.0),
+                              dict(plan2["epochs"][v][0], start=90.0, drift_seed=8)]
+    allsw = realistic.epoch_profiles(plan2, base, 1.0)
+    nosw = realistic.epoch_profiles(plan2, base, 0.0)
+    check(json.loads(json.dumps(nosw)) == realistic.epoch_profiles(plan2, base, 0.0), "deterministic")
+    for sp in plan2["speakers"]:
+        v = sp["voice"]
+        check(allsw[v][0] == base[v] and nosw[v][0] == base[v], "epoch 0 is the base profile")
+        for k in range(1, len(plan2["epochs"][v])):
+            check(not nosw[v][k].get("device_switch"), "switch_p=0: no switch")
+            if sp["channel"] == "remote":
+                check(allsw[v][k].get("device_switch") and allsw[v][k]["codec"] != base[v].get("codec"),
+                      "switch_p=1: remote later epoch on another codec")
+            else:
+                check(not allsw[v][k].get("device_switch"), "switch_p=1: local stays")
 
     # ---- determinism --------------------------------------------------------------
     out2 = str(tmp / "out2")
