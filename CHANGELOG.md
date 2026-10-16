@@ -38,6 +38,20 @@ All notable changes to whosaid are documented here. This project adheres to
   `query` (substring of folder or source name) and `compact` (folder, kind, created, minutes).
   On that workspace the default call drops to ~14k characters (~7k compact).
 
+### Fixed
+
+- **Teams chat scraper no longer harvests a stale client snapshot (#86).** A freshly opened
+  Teams tab can still show the previous session's cached rail and threads, so the newest
+  messages were silently missed. The scraper now waits for the rail order to stay unchanged
+  for 20 s (and for the tab to be at least 30 s old) before it counts or lists chats, and after
+  each thread it compares the newest harvested message with the rail row's time: a lagging
+  thread is re-harvested once, and one that still lags is listed in `__ts.stale` with a
+  `progress.warning`. Pill counts are taken after the readiness wait. All timings are
+  `__TS_*` knobs. The README recommends a cutoff of at least the run interval plus 36 h so
+  every message is covered by two delta runs (ingest dedups on epoch). The rail row's
+  timestamp selector has not been checked against live Teams yet; rows without it skip the
+  per-thread check.
+
 ## [1.13.4] - 2026-10-07
 
 ### Added
