@@ -8,6 +8,13 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ### Added
 
+- **`runner_up_placed_alone` on placed-voice absorbs** ([#77](https://github.com/sblattj/whosaid/issues/77)).
+  `registry_matches` absorb records now also carry `runner_up_placed_alone` / `_name` / `_share` /
+  `_sim`: the best already-placed cluster competing on its own, with no voiceprints, so an
+  enrolled voice absent from the meeting can no longer win the runner-up and hide the blend
+  partner. Recorded only: names are unchanged (44 synthetic blend runs identical to v1.13.4).
+  The candidate gate (placed winner sim < 0.0, share >= 0.05) fired on no row, so it did not ship.
+
 - **Outlook mail as a source-tagged corpus.** `contrib/outlook-scraper/outlook-mail-scraper.js`
   walks the Outlook on the web message list (a folder or a search) the way the Teams scraper
   walks the chat rail and emits the same raw_by_chat shape, keyed by thread subject with the
