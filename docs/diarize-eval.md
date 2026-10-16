@@ -167,6 +167,125 @@ no network call. ElevenLabs shared-library voices are synthesized directly by `v
 "add voice" step. A custom voices or lines file refuses to run against the default cache, so
 always pass `--out`. Then point `build.py --pool` at `<out>/pool.json`.
 
+## Calibrated realistic meetings (#80)
+
+`realistic.py` builds meetings whose **diarizer output** matches the stats of 44 real
+recordings (`real_stats.json`). `calibrate.py` compares the two side by side.
+
+### Roster similarity
+
+`voice_sim_realistic.json` holds the pairwise cosines of the 12 `in-m` roster voices
+(enrollment clips, whosaid's TitaNet-small embedder):
+
+| pairs | n | mean cosine | max | pairs at 0.60 or more |
+|---|---|---|---|---|
+| ElevenLabs ↔ ElevenLabs | 15 | 0.243 | 0.456 | 0 |
+| OpenAI ↔ OpenAI | 15 | 0.558 | 0.814 | 6 |
+| ElevenLabs ↔ OpenAI | 36 | 0.087 | 0.353 | 0 |
+| all | 66 | 0.229 | 0.814 | 6 |
+| real people (for reference) | | 0.25 (p90 0.45) | | |
+
+The ElevenLabs half sits close to real colleagues. The OpenAI half is still bunched: 6 of
+its 15 pairs score above what most real pairs do. Across vendors the voices are further apart
+than real people.
+
+### Turn taking
+
+The diarizer does not see the truth turns exactly. It trims each turn to its voiced span,
+misses part of every overlap, and splits long turns at pauses. On the roster batches it
+widened the gap median by 0.16 to 0.26 s, halved the share of gaps under 0.3 s, saw 66 to 75%
+of the overlap and cut the >8 s talk share by about 9%. So the planner aims the **truth** a
+little tighter than the real numbers. The knobs are named constants at the top of
+`realistic_plan.py` (`GAP_MEDIAN`, `OVERLAP_MEDIAN`, `OV_SWITCH_P`, `OV_SECONDS`,
+`OV_MIN_PREV`, `BC_P`, `LONG_TAIL_MEAN`, `BIN_SHARE`).
+
+Overlap comes mostly from a few long talk-overs of turns of 3 s or more, not from many
+backchannels. Every overlap is also a 0 s gap, so many short ones would pull the gap median
+far below the real 0.74 s.
+
+### Device switches
+
+Parameter drift (bitrate, EQ, level, room) moves whosaid's embedding by only about 0.01
+cosine, too little to split a cluster. A change of device does: with 8 s chunks against a
+60 s enrollment, the same codec family scores 0.90, opus to g722 0.83, opus to a near-mic
+path 0.80 and opus to a phone line 0.67. Real over-split second clusters score 0.70 to 0.83.
+
+- `--device-switch P` (default 0.25): each later epoch of a remote speaker moves to another
+  codec family with probability P (`channel.device_switch`).
+- `--enroll-switch P` (default 0.3): a remote speaker's enrollment clip comes from another
+  device, as when a voiceprint was taken on an earlier call.
+
+`truth.json` records both per speaker (`device_switch_epochs`, `enroll_device_switch`). Pass
+`--device-switch 0 --enroll-switch 0` to get the earlier channel behavior.
+
+### Calibration
+
+Batch: `--seed 406 --count 4 --minutes 30-120 --roster in-m` (3 h 33 min of audio, 6 to 8
+speakers each), whosaid v1.13.4 with `--max-speakers 8`, refs mode. The seed was picked from
+12 candidates (401-412) by planning them without audio. Seed 406 was the one where the
+4-meeting median length lands near the real 44 minutes (with 4 meetings, a random draw from
+30-120 minutes misses that about half the time) and every meeting has at most 8 true
+speakers, so `--max-speakers 8` never forces two people into one cluster. That second choice
+affects the speakers-per-meeting row and the switch and gap stats.
+
+```sh
+uv run --with numpy python test/diarize_eval/realistic.py \
+    --pool ~/.cache/whosaid/diarize-eval-real/pool.json --out /tmp/m80c/final \
+    --seed 406 --count 4 --minutes 30-120 --roster in-m
+python3 test/diarize_eval/run.py --meetings /tmp/m80c/final --modes refs \
+    --whosaid FROZEN/whosaid --run-name m80c-final --extra "--max-speakers 8"
+python3 test/diarize_eval/calibrate.py --meetings /tmp/m80c/final \
+    --run ~/.cache/whosaid/diarize-eval/runs/m80c-final --mode refs
+```
+
+Before is the 6-meeting roster batch of 20 to 45 minutes (seed 91), on the earlier planner
+and channel model. The meeting-length row changes because the batch is longer, not because of
+the planner.
+
+| metric | before | after | real |
+|---|---|---|---|
+| meeting minutes | 30.2 | 44.6 | 44 |
+| switches / min | 5.84 | 5.74 | 5.7 |
+| gap median (s) | 0.89 | 0.76 | 0.74 |
+| gaps under 0.3 s | 21.8% | 28.9% | 26% |
+| overlap share | 2.7% | 4.7% | 4% |
+| 1-2 s turns, share of turns | 17.9% | 19.1% | 18% |
+| 2-4 s turns, share of talk | 18.4% | 16.0% | 14% |
+| >8 s turns, share of talk | 38.5% | 44.4% | 47% |
+| cosine, correct pass-1 | 0.894 | 0.889 | 0.72-0.89 |
+| cosine, over-split second cluster | 0.68 (n=11) | 0.65 (n=12) | 0.70-0.83 |
+| cosine, blend best candidate | 0.65 (n=3) | none | 0.75-0.84 |
+| **outside ±20%** | **7 of 21** | **1 of 20** | |
+
+The one miss is the over-split cosine. Its 12 clusters run from 0.32 to 0.81. The three that
+come from a device-switched stretch score 0.64 to 0.81. Most of the rest are fragments of 1 to
+40 s at 0.32 to 0.68, and they pull the median down. This batch had no blend cluster, so the blend row is not judged; add
+`--blends K` to test that case.
+
+### The #77 failure, reproduced
+
+On the same batch, v1.12.1 (per-turn purity gate) and v1.13.4 (talk-share gate) produce identical
+segments and pass-1 scores on all 4 meetings; they differ only in the placed-voice absorb. Truth confirms
+two second clusters as true splits, and the old gate refuses both:
+
+| meeting | cluster | truth (share of its time) | cosine to enrollment | per-turn purity | v1.12.1 | v1.13.4 |
+|---|---|---|---|---|---|---|
+| m406-003 | SPEAKER_04, 218 s | Sanjay (97%) | 0.723 | 0.10 | refused | named Sanjay |
+| m406-003 | SPEAKER_05, 189 s | Chandu (92%) | 0.720 | 0.05 | refused | named Chandu |
+| m406-002 | SPEAKER_05, 115 s | Echo (84%) | 0.770 | 0.15 | refused | named Echo |
+
+Sanjay's first cluster comes from a device-switched stretch (98% of its time), scores 0.814
+and passes both gates at purity 0.53. DER on the two meetings is 25.2 → 21.7% (m406-002) and
+21.7 → 14.4% (m406-003) from v1.12.1 to v1.13.4. This is the first synthetic run that shows
+#77's shape: a known speaker's second cluster at 0.70 to 0.83 that the purity gate refuses.
+
+### Reproducing older batches
+
+The planner constants and the channel defaults both changed, so the batches this page cites by
+seed (the seed-91 roster batch, the seed-95 and seed-96 blend batches) no longer rebuild byte
+for byte. `--device-switch 0 --enroll-switch 0` restores only the channel half; the plans
+differ anyway. The last rebuild of seed 91 is in `/tmp/m80-rebuild`, outside the repo.
+
 ## Results (v1.10.0)
 
 Two sets of meetings were used. The 32 **tuning** meetings (`tune`, `tune-hard`, `tune-cameo` and
@@ -278,9 +397,9 @@ cameo fragments left anonymous (val-cameo DER +1.4 points).
 
 The synthetic voices are harder on this gate than real meetings. The #80 calibration puts
 an unenrolled speaker's best cosine to a known voice at 0.17–0.45 on real recordings, below the
-0.70 bar where the placed-voice absorb starts. The roster batch's calibration still misses 7 of
-21 metrics by more than ±20%, among them the correct-match cosine (0.89 synthetic against
-0.72–0.89 real) and the over-split second-cluster cosine (0.68 against 0.70–0.83).
+0.70 bar where the placed-voice absorb starts. At the time the roster batch's calibration
+missed 7 of 21 metrics by more than ±20%; see [Calibrated realistic meetings (#80)](#calibrated-realistic-meetings-80)
+for the retuned batch (1 of 20).
 
 ## Blends (v1.13.2)
 

@@ -8,6 +8,16 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ### Added
 
+- **Calibrated realistic eval meetings** ([#80](https://github.com/sblattj/whosaid/issues/80)).
+  `test/diarize_eval/realistic.py` now aims turn-taking at what the diarizer outputs (overlap
+  4.7% vs real 4%, gap median 0.76 s vs 0.74, 5.74 switches/min vs 5.7), fixes an overlap
+  overcount, and adds remote device switches (`--device-switch`, `--enroll-switch`) so a
+  speaker's voiceprint drifts like a real one. On a 4-meeting, 3.5 h roster batch calibrate.py
+  misses 1 of 20 metrics (was 7 of 21); the over-split cosine is still low (0.65 vs 0.70-0.83).
+  The same batch reproduces the #77 failure: v1.12.1 refuses three truth-verified splits that
+  v1.13.4 names. Roster similarity is saved in `voice_sim_realistic.json`. Batches cited by
+  seed before this change no longer rebuild byte for byte.
+
 - **`runner_up_placed_alone` on placed-voice absorbs** ([#77](https://github.com/sblattj/whosaid/issues/77)).
   `registry_matches` absorb records now also carry `runner_up_placed_alone` / `_name` / `_share` /
   `_sim`: the best already-placed cluster competing on its own, with no voiceprints, so an
