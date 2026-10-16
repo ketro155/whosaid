@@ -2093,6 +2093,10 @@ def main() -> None:
                          "voiceprints is pinned to that person, and only the remaining turns "
                          "are clustered into new speakers. A listed person who never speaks "
                          "is dropped, so a varying-attendance roster needs no exact count.")
+    ap.add_argument("--me", default=os.environ.get("WHOSAID_OWNER") or None, metavar="NAME",
+                    help="your name, for `whosaid record --app` stereo files: the one cluster "
+                         "heard only on the mic is named NAME and app-side clusters can never "
+                         "be NAME (default: $WHOSAID_OWNER; no effect on other inputs)")
     ap.add_argument("--anchor-threshold", type=float, default=default_anchor_threshold(),
                     help=f"min per-turn cosine for --expected-speakers to pin a turn to a known "
                          f"voice. Default {DEFAULT_ANCHOR_THRESHOLD:.2f}; env "
@@ -2448,6 +2452,17 @@ def main() -> None:
     if recovery_warning:
         count_warning = recovery_warning
 
+    # ---- mic vs app sides for `whosaid record --app` stereo files (#92) ----
+    try:
+        import stereo_channels
+    except ImportError:  # installed as the whosaid package
+        from . import stereo_channels
+    segs, channels = stereo_channels.attribute(args.audio, segs, names, args.me, log=log)
+    if channels and channels["moved"]:
+        # A cluster created for the local voice has no voiceprint yet, so relabel
+        # can name it in the transcript but can't save it to the registry.
+        speakers = sorted({s["speaker"] for s in segs})
+
     # ---- per-speaker roles (registry "role" tags) for rendering + the sidecar ----
     roles: dict[str, str] = {}
     if not args.no_registry:
@@ -2482,6 +2497,7 @@ def main() -> None:
         "uncounted": uncounted,
         "names": names,
         "local_labels": local_labels,
+        "channels": channels,
         "fold_evidence": fold_evidence,
         "registry_matches": registry_matches,
         "source": source_metadata(args.audio),

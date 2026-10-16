@@ -28,13 +28,20 @@ All notable changes to whosaid are documented here. This project adheres to
   on `transcript_id`. The roll-up audit treats the new kind as text-only, like `teams-chat`.
   Checked live on a 476-entry transcript (476 of 476 read, 474 turns).
 
-- **`whosaid record --app A`: record one app's audio, plus the mic.** ScreenCaptureKit captures
-  only the chosen app (Zoom, a browser tab's audio, ...) with no virtual audio device, and the mic
-  rides the same stream (macOS 15+), so both legs share one clock. Saved as stereo m4a, left = mic,
-  right = the app, then transcribed as usual. `--no-mic` records the app alone; `--list-apps` lists
-  what `--app` accepts. The Swift helper (`lib/record_app.swift`) is built on first use and cached
-  by source hash. If macOS ends the capture early, the audio recorded so far is kept. The diarizer
-  still downmixes to mono, so the channel split does not yet label you vs. them.
+- **`whosaid record --app A`: record one app's audio, plus the mic (#92).** ScreenCaptureKit
+  captures only the chosen app (Zoom, a browser tab's audio, ...) with no virtual audio device,
+  and the mic rides the same stream (macOS 15+), so both legs share one clock. Saved as stereo
+  m4a, left = mic, right = the app, then transcribed as usual. `--no-mic` records the app alone;
+  `--list-apps` lists what `--app` accepts. The Swift helper (`lib/record_app.swift`) is built on
+  first use and cached by source hash. Each leg is placed by timestamp: gaps are filled with
+  silence and a leg running ahead of its timestamps is trimmed, so the two can't drift apart.
+  When macOS kills the capture (a display change, sleep) it restarts in place, up to 5 times;
+  after that, or on a revoked permission, the audio recorded so far is kept.
+- **You vs. them on `record --app` files.** The diarizer reads the two channels: the app channel
+  never carries your voice, so speech heard only on the mic is yours. Mic-only runs that the mono
+  diarizer merged into an app-side voice are split back out, and with `--me NAME` (or
+  `$WHOSAID_OWNER`) the one mic-side cluster is named NAME and no app-side cluster can be. The
+  sidecar records each cluster's side under `channels`. Untagged or mono files are unchanged.
 
 ### Changed
 

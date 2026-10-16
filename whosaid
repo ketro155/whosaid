@@ -321,6 +321,10 @@ TRANSCRIBE FLAGS
   -l, --lang CODE     Language code (default: en; use "auto" to auto-detect).
   -f, --format FMT    txt | srt | vtt | tsv | json | all (default: all).
   -n, --name NAME     Output base name (single input only; default: input basename).
+      --me NAME        Your name, for `whosaid record --app` stereo files: the one
+                       cluster heard only on the mic is named NAME, and a cluster
+                       heard in the app can never be NAME. Default: $WHOSAID_OWNER.
+                       No effect on any other input.
       --speakers N     Exact speaker count for diarization (e.g. 2 for a 1:1 call;
                        omit to auto-detect the number of speakers).
       --min-speakers N  Lower bound on the auto-detected speaker count.
@@ -421,6 +425,8 @@ RECORD FLAGS
   --app A             Capture app A's audio instead of only the mic. A is a bundle ID
                       (us.zoom.xos), an app name (Zoom), or a unique part of either.
                       Saved as stereo: left = mic (you), right = the app (them).
+                      With --me NAME (or $WHOSAID_OWNER), the voice heard only on the
+                      mic is named NAME and app-side voices can never be NAME.
                       Needs macOS 15+, Xcode Command Line Tools (the helper is built
                       on first use) and Screen & System Audio Recording permission
                       for your terminal.
@@ -1363,9 +1369,10 @@ record_app_audio() {
     ffmpeg -hide_banner -loglevel warning -y -i "$tmpdir/app.wav" -ac 1 -c:a aac -b:a 96k "$out"
   else
     # error, not warning: join otherwise logs "Guessed Channel Layout" per mono input.
+    # The comment tag tells the diarizer which channel is which (lib/stereo_channels.py).
     ffmpeg -hide_banner -loglevel error -y -i "$tmpdir/mic.wav" -i "$tmpdir/app.wav" \
       -filter_complex "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]" -map "[a]" \
-      -c:a aac -b:a 128k "$out"
+      -metadata comment="whosaid:channels=mic,app" -c:a aac -b:a 128k "$out"
   fi
   rm -rf "$tmpdir"
 }
@@ -1474,6 +1481,7 @@ cmd_transcribe() {
   local MAX_SPEAKERS=""
   local EXPECTED_SPEAKERS=()
   local ANCHOR_THRESHOLD=""
+  local ME="${WHOSAID_OWNER:-}"
   local AUDIO=()
 
   while [[ $# -gt 0 ]]; do
@@ -1492,6 +1500,7 @@ cmd_transcribe() {
       --max-speakers) MAX_SPEAKERS="$2"; shift 2 ;;
       --expected-speakers) EXPECTED_SPEAKERS+=("$2"); shift 2 ;;
       --anchor-threshold) ANCHOR_THRESHOLD="$2"; shift 2 ;;
+      --me)         ME="$2"; shift 2 ;;
       -j|--jobs)    JOBS="$2"; shift 2 ;;
       --chunk-seconds) CHUNK_SECONDS="$2"; shift 2 ;;
       --absorb-threshold) ABSORB="$2"; shift 2 ;;
@@ -1591,6 +1600,7 @@ cmd_transcribe() {
           for exp in "${EXPECTED_SPEAKERS[@]}"; do dargs+=(--expected-speakers "$exp"); done
         fi
         [[ -n "$ANCHOR_THRESHOLD" ]] && dargs+=(--anchor-threshold "$ANCHOR_THRESHOLD")
+        [[ -n "$ME" ]] && dargs+=(--me "$ME")
         [[ -n "$JOBS" ]] && dargs+=(--jobs "$JOBS")
         [[ -n "$CHUNK_SECONDS" ]] && dargs+=(--chunk-seconds "$CHUNK_SECONDS")
         [[ "$NO_CHUNK" == "1" ]] && dargs+=(--no-chunk)

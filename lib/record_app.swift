@@ -93,6 +93,11 @@ final class Leg {
     var written: Int64 = 0
     var peak: Float = 0
     var buffers = 0
+    /// Timestamp position minus written position at the last buffer, before
+    /// correction. Stays near zero when the leg tracks the shared clock.
+    var skew: Int64 = 0
+    var filled: Int64 = 0
+    var dropped: Int64 = 0
 
     init(name: String, url: URL) throws {
         self.name = name
@@ -141,16 +146,44 @@ final class Leg {
 
     /// `offset`: where this buffer belongs on the shared timeline, in samples.
     func append(_ input: AVAudioPCMBuffer, at offset: Int64) {
-        guard let buf = convert(input), buf.frameLength > 0 else { return }
-        // Fill gaps over 20 ms (the app went quiet and SCK stopped sending);
-        // smaller jitter is ignored so a continuous leg stays continuous.
-        if offset - written > Int64(sampleRate / 50) { writeZeros(offset - written) }
+        guard var buf = convert(input), buf.frameLength > 0 else { return }
+        // Correct only past 20 ms so timestamp jitter never splices a
+        // continuous leg. Behind its timestamps (the app went quiet and SCK
+        // stopped sending): fill the gap with silence. Ahead of them (a device
+        // clock running fast, delivering more samples than time passed): drop
+        // the overlap, or the legs drift apart over a long meeting.
+        let tolerance = Int64(sampleRate / 50)
+        skew = offset - written
+        if skew > tolerance {
+            writeZeros(skew)
+            filled += skew
+        } else if -skew > tolerance {
+            let drop = Int(min(-skew, Int64(buf.frameLength)))
+            dropped += Int64(drop)
+            guard drop < Int(buf.frameLength), let rest = tail(of: buf, from: drop) else { return }
+            buf = rest
+        }
         if let ch = buf.floatChannelData?[0] {
             for i in 0..<Int(buf.frameLength) { peak = max(peak, abs(ch[i])) }
         }
         do { try file.write(from: buf) } catch { log("\(name): write failed: \(error.localizedDescription)") }
         written += Int64(buf.frameLength)
         buffers += 1
+    }
+
+    func tail(of buf: AVAudioPCMBuffer, from start: Int) -> AVAudioPCMBuffer? {
+        let n = Int(buf.frameLength) - start
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(n)),
+              let src = buf.floatChannelData?[0], let dst = out.floatChannelData?[0] else { return nil }
+        dst.update(from: src + start, count: n)
+        out.frameLength = AVAudioFrameCount(n)
+        return out
+    }
+
+    /// e.g. "skew +3ms, filled 1.2s, dropped 0ms" for the progress line.
+    func driftSummary() -> String {
+        String(format: "skew %+.0fms, filled %.1fs, dropped %.0fms", Double(skew) / sampleRate * 1000,
+               Double(filled) / sampleRate, Double(dropped) / sampleRate * 1000)
     }
 
     func takePeakDB() -> String {
@@ -179,6 +212,14 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     var t0: Double?
     var stream: SCStream?
     var finished = false
+    var target: SCRunningApplication?
+    /// Bounded restarts after macOS kills the stream mid-capture (display
+    /// change, sleep): a meeting would otherwise lose the rest of its other
+    /// side. The legs stay open, and because buffers are placed by timestamp
+    /// the gap fills itself with silence once the new stream delivers.
+    var restartAttempts = 0
+    var restarts = 0
+    let maxRestartAttempts = 5
 
     init(app: Leg, mic: Leg?) {
         self.app = app
@@ -202,14 +243,50 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        // Close the files either way: the audio captured so far is valid and
-        // the caller keeps it (exit 3 = ended early, 5 = permission revoked).
         log("capture stopped by macOS: \(error.localizedDescription)")
+        // A revoked grant fails the same way every time: close the files (the
+        // audio so far is valid and the caller keeps it) instead of retrying.
         if isPermissionError(error) {
             permissionHelp()
             finish(code: 5)
-        } else {
-            finish(code: 3)
+            return
+        }
+        guard stream === self.stream else { return }  // a replaced stream's late callback
+        Task { await self.restart() }
+    }
+
+    func restart() async {
+        while true {
+            if queue.sync(execute: { finished }) { return }
+            guard restartAttempts < maxRestartAttempts else {
+                log("giving up after \(maxRestartAttempts) restart attempts; keeping the audio recorded so far.")
+                finish(code: 3)
+                return
+            }
+            restartAttempts += 1
+            let attempt = restartAttempts
+            try? await Task.sleep(nanoseconds: UInt64(0.5 * Double(attempt) * 1_000_000_000))
+            if queue.sync(execute: { finished }) { return }
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                guard let id = target?.bundleIdentifier,
+                      let app = content.applications.first(where: { $0.bundleIdentifier == id }),
+                      let display = content.displays.first else {
+                    throw NSError(domain: "record-app", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "the app or a display is not available"])
+                }
+                try await start(target: app, display: display)
+                restarts += 1
+                log("capture restarted (attempt \(attempt)); the gap is filled with silence.")
+                return
+            } catch {
+                if isPermissionError(error) {
+                    permissionHelp()
+                    finish(code: 5)
+                    return
+                }
+                log("restart attempt \(attempt) failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -231,8 +308,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         Task {
             try? await s?.stopCapture()
             let secs = Double(self.app.written) / sampleRate
-            log(String(format: "stopped after %.1fs (app buffers: %d%@)", secs, self.app.buffers,
-                       self.mic.map { ", mic buffers: \($0.buffers)" } ?? ""))
+            log(String(format: "stopped after %.1fs (app buffers: %d%@, restarts: %d)", secs, self.app.buffers,
+                       self.mic.map { ", mic buffers: \($0.buffers)" } ?? "", self.restarts))
             exit(code)
         }
     }
@@ -256,6 +333,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         if mic != nil { try s.addStreamOutput(self, type: .microphone, sampleHandlerQueue: queue) }
         try await s.startCapture()
         stream = s
+        self.target = target
     }
 }
 
@@ -344,9 +422,20 @@ Task {
     while true {
         try? await Task.sleep(nanoseconds: 10_000_000_000)
         let elapsed = Date().timeIntervalSince(started)
-        var line = String(format: "%5.0fs  app peak %@", elapsed, rec.queue.sync { rec.app.takePeakDB() })
-        if let mic = rec.mic { line += "  mic peak " + rec.queue.sync { mic.takePeakDB() } }
+        var line = String(format: "%5.0fs  app peak %@ (%@)", elapsed, rec.queue.sync { rec.app.takePeakDB() },
+                          rec.queue.sync { rec.app.driftSummary() })
+        if let mic = rec.mic {
+            line += "  mic peak " + rec.queue.sync { mic.takePeakDB() } + " (" + rec.queue.sync { mic.driftSummary() } + ")"
+        }
         log(line)
+        // Test hook: simulate macOS killing the stream, to exercise restart.
+        if let kill = ProcessInfo.processInfo.environment["WHOSAID_RECORD_APP_TEST_KILL_AFTER"],
+           let at = Double(kill), elapsed >= at, rec.restarts == 0, rec.restartAttempts == 0, let s = rec.stream {
+            log("test hook: stopping the stream to simulate a mid-capture death")
+            try? await s.stopCapture()
+            rec.stream(s, didStopWithError: NSError(domain: "record-app.test", code: -1,
+                                                    userInfo: [NSLocalizedDescriptionKey: "simulated stream death"]))
+        }
         if elapsed >= maxSeconds {
             log("reached --max-seconds \(Int(maxSeconds)); stopping.")
             rec.finish(code: 0)
