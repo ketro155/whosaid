@@ -13,7 +13,9 @@ itself stays offline and only reads the JSON the scraper hands over.
 1. Open `teams.cloud.microsoft` and sign in. Optionally set
    `window.__TS_CUTOFF_DAYS = 14` first (the default is 7).
 2. Evaluate the whole file in the tab. It installs `window.__ts` and starts the
-   scrape without waiting for it to finish (see *Long scrapes* below).
+   scrape without waiting for it to finish (see *Long scrapes* below). It first
+   waits for the client to be fresh (see *Readiness* below), so expect at least
+   about 30 s with `progress.phase` = `waiting-for-fresh-rail` on a new tab.
 3. Poll with short calls until `window.__ts.done` is `true`, watching
    `JSON.stringify(window.__ts.progress)`. A non-null `window.__ts.error` means
    the scrape failed.
@@ -51,6 +53,59 @@ or `{"messages": [...]}`. Each record's fields:
 Records may be unsorted and may repeat. Ingest dedups on the epoch, so
 re-running a scrape over an overlapping window is safe.
 
+Each chat entry also carries `newest` (epoch of the newest message seen in the
+thread, including ones older than the cutoff or without text) and `freshness` (`rowEpoch`,
+`newestBefore`, `newestAfter`, `reharvested`; see *Readiness* below). Ingest
+ignores both.
+
+**Delta runs: overlap by at least 36 h.** If a driver scrapes on a schedule,
+set the cutoff to at least the run interval plus 36 h, so consecutive windows
+overlap by 36 h or more (for example `window.__TS_CUTOFF_DAYS = 3` for a daily
+run, a 48 h overlap). Every message is
+then covered by two independent runs, so one run that hit a stale client
+(issue #86) does not lose it. Ingest dedups on the epoch, so the overlap is
+free.
+
+## Readiness: wait for a fresh client (issue #86)
+
+A freshly opened Teams tab can render a cached snapshot from the previous
+session for a while. The rail row count is already right, but the rail and the
+threads miss everything posted since. A scrape at that point reports
+`reachedCutoff=true` and `kept=0` for a chat whose newest messages are simply
+not in the DOM yet. Waiting for the row count to settle is not enough. The
+scraper has two guards:
+
+1. **Rail order.** Before it lists chats it samples the order of the mounted
+   rail rows (their `aria-label`s) and waits until it has been unchanged for
+   20 s. The rail re-sorts when the sync lands, so a stable order is the
+   freshness signal. It also waits until the tab is at least 30 s old
+   (measured from `performance.timeOrigin`). The two waits overlap: a cold tab
+   injected at 9 s with a stable rail is ready at about 30 s, a warm tab after
+   about 20 s. If the order has not settled after
+   120 s it carries on and sets `window.__ts.progress.warning`. The outcome is
+   in `window.__ts.readiness` (`polls`, `waitedMs`, `tabAgeMs` at start,
+   `orderChanges`, `gaveUp`).
+2. **Per thread.** After harvesting a chat it re-reads the chat row's
+   `<time datetime>` (assumed DOM, see below). If the newest harvested message is
+   more than 60 s older than that, it waits 5 s, reopens the chat and harvests
+   once more, merging both passes. If the thread still looks older than the row,
+   the chat name goes into `window.__ts.stale` and `window.__ts.progress.warning`
+   says so. Rows without a machine-readable time skip this check.
+
+Warnings from the pill check, the rail and stale threads are joined with `; `
+in `window.__ts.progress.warning`. Treat any warning as "re-run later".
+
+All timings can be overridden by setting globals before injecting the file:
+
+| Global | Default | Meaning |
+|---|---|---|
+| `__TS_RAIL_STABLE_MS` | 20000 | Rail order must be unchanged this long. |
+| `__TS_RAIL_POLL_MS` | 1000 | Rail order sample interval. |
+| `__TS_READY_FLOOR_MS` | 30000 | Minimum tab age before harvesting. |
+| `__TS_READY_MAX_MS` | 120000 | Stop waiting for the rail (and warn) after this. |
+| `__TS_FRESH_TOLERANCE_MS` | 60000 | Allowed gap between row time and newest message. |
+| `__TS_REFRESH_WAIT_MS` | 5000 | Wait before the single re-harvest of a stale thread. |
+
 ## DOM contract (Teams web, `teams.cloud.microsoft`)
 
 - **Chat list:** `[role="treeitem"][data-item-type="chat"]`. Folders are
@@ -75,11 +130,14 @@ re-running a scrape over an overlapping window is safe.
   `window.__ts.pills`. If the chat count changed after clearing it sets
   `window.__ts.progress.warning`, so a run that would have skipped chats does not
   look complete. It presses your pill(s) again when the scrape ends.
+- **Row time (issue #86, assumed, not re-verified):** a `<time datetime="ISO">`
+  inside the chat row gives the chat's last activity. Only this machine-readable
+  value is used, never relative text like "Yesterday".
 
-Scrape loop per chat: click the chat row, then scroll the viewport up in steps
+Scrape loop per chat: click the chat row, wait about 900 ms, then scroll the viewport up in steps
 of about 0.85 × `clientHeight` with a ~550 ms settle, re-harvesting each frame.
 Stop when the oldest `data-mid` is older than the cutoff, the top is reached, or
-several frames make no progress.
+several frames make no progress. Then run the per-thread freshness check above.
 
 **Long scrapes and the CDP call limit.** A single `Runtime.evaluate` call is
 capped at about 15 s, and a multi-chat scrape runs for minutes. Start the async

@@ -46,7 +46,8 @@ function buildWorld(initiallyPressed) {
       return [];
     },
   };
-  const window = { __TS_CUTOFF_DAYS: 7, __TS_PILL_SETTLE_MS: 5 };
+  const window = { __TS_CUTOFF_DAYS: 7, __TS_PILL_SETTLE_MS: 5,
+    __TS_RAIL_STABLE_MS: 3, __TS_RAIL_POLL_MS: 1, __TS_READY_FLOOR_MS: 0 };  // issue #86 readiness, shrunk
   const ctx = vm.createContext({
     window, document, Date, Math, Number, Array, Set, Map, String, Infinity, Promise,
     setTimeout: (f) => setTimeout(f, 0),   // collapse all scraper waits
