@@ -1290,7 +1290,10 @@ def name_clusters(cluster_emb: dict, ref_threshold: float, absorb_threshold: flo
     the winning cluster's centroid similarity to the candidate (None when a known
     voice wins). Also recorded only: on the same runs the winner was a true blend
     partner in 9 of 13 blend rows, but named blends held shares of 0.00-0.17
-    while true splits reached 0.31. With no `turn_emb` (the `relabel --auto` sidecar keeps
+    while true splits reached 0.31. `runner_up_placed_alone` / `_name` / `_share` /
+    `_sim` repeat it with ONLY those placed-cluster centroids competing (no
+    voiceprints), so an enrolled voice absent from the meeting cannot win and hide
+    how the best placed cluster did; recorded only. With no `turn_emb` (the `relabel --auto` sidecar keeps
     only centroids) the low bar does not apply and absorb_threshold is used.
 
     Clusters whose best candidate stays BELOW the gate keep their anonymous
@@ -1490,16 +1493,20 @@ def name_clusters(cluster_emb: dict, ref_threshold: float, absorb_threshold: flo
                 got += w
         return got / total
 
-    def runner_up(sp, cand, extra=None):
+    def runner_up(sp, cand, extra=None, only_extra=False):
         """(name, share) of the OTHER known voice holding the most of sp's talk time:
         seconds-weighted share of turns whose best known voice is that voice and score
         >= PLACED_ABSORB_TURN_FLOOR against it, weighted exactly like talk_share.
         `extra` ({label: [unit vectors]}) adds more contenders, e.g. the meeting's
-        anonymous cluster centroids. (None, 0.0) when no other voice wins any turn or
-        no turns are available."""
-        contenders = voice_vecs if not extra else {**voice_vecs, **extra}
+        anonymous cluster centroids. `only_extra` drops the known voiceprints so only
+        `extra` competes (an absent enrolled voice can then never win). (None, 0.0)
+        when no other voice wins any turn, nothing competes, or no turns are available."""
+        if only_extra:
+            contenders = dict(extra or {})
+        else:
+            contenders = voice_vecs if not extra else {**voice_vecs, **extra}
         rows = (turn_emb or {}).get(sp)
-        if rows is None or len(rows) == 0:
+        if rows is None or len(rows) == 0 or not contenders:
             return None, 0.0
         spans = (turn_spans or {}).get(sp)
         weights = [1.0] * len(rows)
@@ -1591,6 +1598,15 @@ def name_clusters(cluster_emb: dict, ref_threshold: float, absorb_threshold: flo
                 rup_sim = None
                 if rup in placed_clusters:
                     rup_sim = max(float(np.dot(unit(cluster_emb[rup]), v)) for v in voice_vecs[pb])
+                # The best placed cluster on its own: only the other voices' placed
+                # cluster centroids compete, no voiceprints, so an enrolled voice absent
+                # from this meeting cannot mask the blend partner (#77, recorded only).
+                rupa, rupa_share = runner_up(sp, pb, {o: [unit(cluster_emb[o])]
+                                                      for o, nm in placed_clusters.items()
+                                                      if nm != pb and o != sp}, only_extra=True)
+                rupa_sim = None
+                if rupa is not None:
+                    rupa_sim = max(float(np.dot(unit(cluster_emb[rupa]), v)) for v in voice_vecs[pb])
                 matched = share >= PLACED_ABSORB_MIN_SHARE and sib_ok
                 record(sp, pb, pc[pb], placed_absorb_threshold, matched, "absorb",
                        purity=round(purity, 4), talk_share=round(share, 4),
@@ -1602,6 +1618,10 @@ def name_clusters(cluster_emb: dict, ref_threshold: float, absorb_threshold: flo
                        runner_up_placed_name=placed_clusters.get(rup, rup),
                        runner_up_placed_share=round(rup_share, 4),
                        runner_up_placed_sim=None if rup_sim is None else round(rup_sim, 4),
+                       runner_up_placed_alone=rupa,
+                       runner_up_placed_alone_name=placed_clusters.get(rupa),
+                       runner_up_placed_alone_share=round(rupa_share, 4),
+                       runner_up_placed_alone_sim=None if rupa_sim is None else round(rupa_sim, 4),
                        second_placed=second,
                        second_placed_sim=None if second is None else round(pc[second], 4),
                        turns=turn_rows(sp, pb))

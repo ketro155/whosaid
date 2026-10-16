@@ -400,3 +400,38 @@ The four named blends:
 A rule requiring `_sim < 0.30` and share >= 0.10 would catch 1 named blend and no named split.
 That is one catch, from a rule chosen after looking at this data, so v1.13.4 records the fields
 and does not gate on them.
+
+## Placed runner-up alone (after v1.13.4)
+
+The #77 reporter's v1.13.4 replay found that `runner_up_placed` is often won by an enrolled voice
+that has no cluster in the meeting, which hides how the best placed cluster did. The placed-voice
+`absorb` record now also carries `runner_up_placed_alone` / `_name` / `_share` / `_sim`. Each turn
+of the cluster competes against ONLY the in-meeting centroids of the clusters already named for
+OTHER voices: no voiceprints, and never the candidate's own clusters. The floor (0.40) and the
+seconds weighting are the same as `runner_up_placed`. `_sim` is the winning cluster's centroid
+similarity to the candidate. All four are null / 0 when no other voice is placed in the meeting.
+
+The 22 blend meetings were rebuilt from the cached clips (seeds 95 and 96, `--blends 3` and
+`--blends 4`; every meeting's truth time matched the earlier build) and re-run on this code in
+`refs` and `refs-subset` (44 runs). Names, named-correct time and named-wrong time were identical
+to v1.13.4 on all 44. The real registry was unchanged.
+
+| label | matched | rows | `runner_up_placed_alone_share` min / median / max | `_sim` min / median / max |
+|---|---|---|---|---|
+| blend | refused | 9 | 0.00 / 0.83 / 1.00 | 0.28 / 0.42 / 0.63 |
+| blend | named | 4 | 0.00 / 0.40 / 0.57 | 0.32 / 0.34 / 0.37 |
+| true split | refused | 7 | 0.00 / 0.14 / 0.66 | 0.34 / 0.40 / 0.71 |
+| true split | named | 41 | 0.00 / 0.28 / 0.96 | 0.30 / 0.45 / 0.60 |
+
+With no voiceprints competing, any turn scoring 0.40 against some other placed cluster counts, so
+shares run much higher than `runner_up_placed` for splits and blends alike. On the three named
+blends that have a winner, it is not the true partner: Sage (51/49 with Coral) goes to a third
+voice at 0.57, because Coral has no placed cluster there. The two Bella rows go to third voices
+at 0.31 and 0.40. In `refs`, Coral does have placed clusters but loses to a third voice's cluster
+(0.31). In `refs-subset`, neither partner is placed (0.40).
+
+The reporter's candidate gate (refuse when the placed winner has `_sim` < 0.0 and share >= 0.05,
+picked from the one real blend, where `runner_up_placed_sim` was -0.113) fires on no row here, on
+either field. No synthetic winner, blend or split, sits below 0.28. The gate would neither catch
+a synthetic blend nor cost a synthetic split. So the synthetic set can't test it. The real
+replay was not available for this change, so the field is recorded only, and names do not change.
