@@ -28,6 +28,14 @@ All notable changes to whosaid are documented here. This project adheres to
   on `transcript_id`. The roll-up audit treats the new kind as text-only, like `teams-chat`.
   Checked live on a 476-entry transcript (476 of 476 read, 474 turns).
 
+- **`whosaid record --app A`: record one app's audio, plus the mic.** ScreenCaptureKit captures
+  only the chosen app (Zoom, a browser tab's audio, ...) with no virtual audio device, and the mic
+  rides the same stream (macOS 15+), so both legs share one clock. Saved as stereo m4a, left = mic,
+  right = the app, then transcribed as usual. `--no-mic` records the app alone; `--list-apps` lists
+  what `--app` accepts. The Swift helper (`lib/record_app.swift`) is built on first use and cached
+  by source hash. If macOS ends the capture early, the audio recorded so far is kept. The diarizer
+  still downmixes to mono, so the channel split does not yet label you vs. them.
+
 ### Changed
 
 - **`whosaid_meetings`, `whosaid_prs` and `whosaid_speakers` page their results (#90).** A

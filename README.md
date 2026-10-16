@@ -121,6 +121,7 @@ the models as usual.
 | `whosaid enroll [Name]` | Records ~45s from the mic reading a printed passage, saves `voices/<Name>.wav`. See [Speaker identity: enrollment clips vs. the registry](#speaker-identity-enrollment-clips-vs-the-registry). |
 | `whosaid enroll <Name> --from FILE [--ss T] [--t D\|--to T] [--force]` | Extracts a clip from an existing recording instead of the mic (extract → verify → save, no interaction). `--ss`/`--t`/`--to` accept seconds or `M:SS`/`H:MM:SS`; same ≥15s/non-silent bar as mic enrollment. |
 | `whosaid record [--label L]` | Foreground mic capture to `recordings/<timestamp>[-label].m4a`, then transcribes automatically. |
+| `whosaid record --app A [--no-mic] [--label L]` | Capture one app's audio (Zoom, a browser, ...) through ScreenCaptureKit, plus the mic, to a stereo `recordings/<timestamp>[-label].m4a` (left = mic, right = the app), then transcribe it. `A` is a bundle ID, an app name, or a unique part of either; `whosaid record --list-apps` lists them. Needs macOS 15+, Xcode Command Line Tools (a small Swift helper, `lib/record_app.swift`, is built on first use into `~/.cache/whosaid`) and Screen & System Audio Recording permission for your terminal. No virtual audio device. `--no-mic` records the app alone. |
 | `whosaid <audio>… [flags]` | The default command: transcribe + diarize + label one or more audio files. `--reuse-asr` skips Whisper when `<out>/<base>.json` already exists and re-diarizes only (errors if the json is missing; not valid with `--no-diarize`). `whosaid transcribe <audio>…` is the same command written explicitly (matching the `whosaid_transcribe` MCP tool name). |
 | `whosaid relabel <base> SPEAKER_02=Jane …` | Put real names on clusters after reading the speaker cards. Rewrites the transcript + cards and saves each named voiceprint to the local registry for future transcripts — refusing (unless `--force`) to overwrite an existing registry entry the new cluster doesn't match (similarity below the match threshold, default 0.50). No re-transcription. |
 | `whosaid relabel <base> SPEAKER_04=Alice --blend` | Average the cluster into Alice's saved print instead of replacing it, to strengthen the print from a new recording. Same similarity guard as a normal relabel. See [Speaker identity: enrollment clips vs. the registry](#speaker-identity-enrollment-clips-vs-the-registry). |
@@ -1355,6 +1356,10 @@ install symlink.
 `./test/enroll_from_file_test.sh` covers `whosaid enroll --from` in isolation (time-window parsing,
 the 15s/silence floor, and the `--force` overwrite guard) with synthesized `say` audio — no model
 download required.
+
+`./test/record_app_test.sh` covers `whosaid record --app` help text and flag errors, and typechecks
+the Swift capture helper when `swiftc` is installed. Capture itself needs a display and a Screen
+Recording grant, so it is not exercised.
 
 `./test/samples_test.sh` covers `whosaid samples` (longest-segment picking, the `--seconds` clamp,
 `--per-speaker`, naming, output format, and the `source`/`--audio` fallback) against a hand-written

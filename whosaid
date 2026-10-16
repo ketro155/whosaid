@@ -8,6 +8,7 @@
 #   whosaid enroll [Name]         Record a voice sample and name a speaker cluster.
 #   whosaid speakers <sub>        Export or import the private speaker registry.
 #   whosaid record [--label L]    Record from the mic, then transcribe it.
+#   whosaid record --app A        Record one app's audio (+ mic), then transcribe it.
 #   whosaid doctor                Read-only environment/model/device report.
 #   whosaid version | --version   Print the installed version.
 #   whosaid mcp                   Run the MCP server (stdio) for AI agents / Claude.
@@ -184,6 +185,10 @@ USAGE
                                         Record (or extract from an existing FILE) a voice
                                         sample and name a speaker cluster.
   whosaid record [--label L] [flags]   Record from the mic, then transcribe it.
+  whosaid record --app A [--no-mic] [--label L] [flags]
+                                        Record one app's audio (Zoom, a browser, ...) via
+                                        ScreenCaptureKit, plus the mic, then transcribe it.
+  whosaid record --list-apps           List apps --app accepts (bundle ID, name).
   whosaid doctor                       Read-only environment/model/device report.
   whosaid version | --version | -V     Print the installed version.
   whosaid mcp                          Run the MCP server (stdio) for AI agents / Claude.
@@ -413,6 +418,14 @@ SAMPLES FLAGS
 
 RECORD FLAGS
   --label L           Suffix the recording filename with -L.
+  --app A             Capture app A's audio instead of only the mic. A is a bundle ID
+                      (us.zoom.xos), an app name (Zoom), or a unique part of either.
+                      Saved as stereo: left = mic (you), right = the app (them).
+                      Needs macOS 15+, Xcode Command Line Tools (the helper is built
+                      on first use) and Screen & System Audio Recording permission
+                      for your terminal.
+  --no-mic            With --app: capture the app only (mono).
+  --list-apps         Print running apps --app accepts, then exit.
   Any transcribe flag above is also accepted and passed through after recording.
 
 ENROLL FLAGS
@@ -1241,18 +1254,146 @@ cmd_enroll() {
 }
 
 # ---- record --------------------------------------------------------------------
+# Build lib/record_app.swift (ScreenCaptureKit app-audio capture) on first use,
+# cached by source hash so an edited helper is rebuilt and a stale one never
+# runs. Prints the binary path. The Screen Recording grant belongs to the
+# terminal app, not this binary, so a rebuild does not re-prompt.
+ensure_record_app_helper() {
+  local src="$REPO_DIR/lib/record_app.swift"
+  [[ -f "$src" ]] || { log "helper source missing: $src"; return 1; }
+  local major
+  major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+  if [[ -z "$major" || "$major" -lt 15 ]]; then
+    log "--app needs macOS 15 or newer (ScreenCaptureKit mic + app capture); this is $(sw_vers -productVersion 2>/dev/null || echo unknown)."
+    return 1
+  fi
+  local hash dir bin
+  hash="$(shasum -a 256 "$src" | cut -c1-12)"
+  dir="${XDG_CACHE_HOME:-$HOME/.cache}/whosaid"
+  bin="$dir/record-app-$hash"
+  if [[ ! -x "$bin" ]]; then
+    if ! command -v swiftc >/dev/null 2>&1; then
+      log "--app needs swiftc to build its capture helper. Install it with: xcode-select --install"
+      return 1
+    fi
+    mkdir -p "$dir"
+    log "building the app-audio capture helper (one time)..."
+    if ! swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos15.0" \
+        -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia \
+        "$src" -o "$bin.tmp" >&2; then
+      rm -f "$bin.tmp"
+      log "helper build failed."
+      return 1
+    fi
+    codesign -s - -f "$bin.tmp" >/dev/null 2>&1 || true
+    rm -f "$dir"/record-app-*[!p]  # drop builds of older sources (keeps *.tmp)
+    mv "$bin.tmp" "$bin"
+  fi
+  printf '%s\n' "$bin"
+}
+
+# Mean volume of FILE in dB ("" when ffmpeg can't tell).
+mean_volume_db() {
+  local ffout
+  ffout="$(ffmpeg -hide_banner -i "$1" -af volumedetect -f null - 2>&1)" || true
+  if [[ "$ffout" =~ mean_volume:\ (-?[0-9.]+)\ dB ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Record APP's audio (+ the mic unless no_mic=1) into OUT, an .m4a.
+# Two mono legs on one timeline become one stereo file: left = mic, right = app.
+record_app_audio() {
+  local app="$1" out="$2" no_mic="$3"
+  local bin tmpdir rc
+  bin="$(ensure_record_app_helper)" || exit 1
+  tmpdir="$(mktemp -d -t whosaid-record-app)"
+  local helper_args=(--app "$app" --out-dir "$tmpdir")
+  [[ "$no_mic" == 1 ]] && helper_args+=(--no-mic)
+
+  log "recording $app to $out — press Ctrl-C to stop (auto-stops after 3h)."
+  # Same no-op INT trap as the mic path: Ctrl-C reaches the helper (which
+  # closes its WAVs and exits 0) without killing this script.
+  set +e
+  trap ':' INT
+  "$bin" "${helper_args[@]}" --max-seconds 10800 </dev/null
+  rc=$?
+  trap - INT
+  set -e
+  # 3 / 5: macOS ended the capture early (display change, sleep, revoked
+  # grant). The helper closed both WAVs first, so keep what was recorded.
+  if [[ "$rc" -eq 3 || "$rc" -eq 5 ]] && [[ -s "$tmpdir/app.wav" ]]; then
+    log "warning: capture ended early (helper exit $rc); keeping the audio recorded so far."
+  elif [[ "$rc" -ne 0 ]]; then
+    rm -rf "$tmpdir"
+    log "app capture failed (helper exit $rc)."
+    exit "$rc"
+  fi
+  if [[ ! -s "$tmpdir/app.wav" ]]; then
+    rm -rf "$tmpdir"
+    log "recording failed — no audio was captured."
+    exit 1
+  fi
+
+  # Silence in the app leg means the app played nothing or the wrong app was
+  # picked; it is not the mic-permission zeros the mic path checks for.
+  local app_db
+  app_db="$(mean_volume_db "$tmpdir/app.wav")"
+  if [[ -z "$app_db" ]] || awk -v m="$app_db" 'BEGIN{exit !((m+0) <= -85)}'; then
+    if [[ "$no_mic" == 1 ]]; then
+      log "the $app capture is SILENT: the app played no audio, or it is the wrong app (whosaid record --list-apps)."
+      rm -rf "$tmpdir"
+      exit 4
+    fi
+    log "warning: no audio came from $app (wrong app, or nobody spoke on its side); continuing with the mic leg."
+  fi
+
+  # The merged file's silence check is dominated by the louder channel, so
+  # check the mic leg on its own: macOS feeds an unauthorized mic silent zeros.
+  if [[ "$no_mic" != 1 ]]; then
+    local mic_db
+    mic_db="$(mean_volume_db "$tmpdir/mic.wav")"
+    if [[ -z "$mic_db" ]] || awk -v m="$mic_db" 'BEGIN{exit !((m+0) <= -85)}'; then
+      log "warning: the mic leg is SILENT; macOS feeds an unauthorized microphone silent zeros."
+      log "Fix: System Settings -> Privacy & Security -> Microphone -> enable your terminal app. Continuing with $app only."
+    fi
+  fi
+
+  if [[ "$no_mic" == 1 ]]; then
+    ffmpeg -hide_banner -loglevel warning -y -i "$tmpdir/app.wav" -ac 1 -c:a aac -b:a 96k "$out"
+  else
+    # error, not warning: join otherwise logs "Guessed Channel Layout" per mono input.
+    ffmpeg -hide_banner -loglevel error -y -i "$tmpdir/mic.wav" -i "$tmpdir/app.wav" \
+      -filter_complex "[0:a][1:a]join=inputs=2:channel_layout=stereo[a]" -map "[a]" \
+      -c:a aac -b:a 128k "$out"
+  fi
+  rm -rf "$tmpdir"
+}
+
 cmd_record() {
   warn_if_not_arm64
   ensure_uv_and_ffmpeg
 
-  local label=""
+  local label="" app="" no_mic=0
   local extra_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --label) label="$2"; shift 2 ;;
+      --app)
+        [[ $# -ge 2 && -n "$2" ]] || { log "--app needs an app (bundle ID or name); see: whosaid record --list-apps"; exit 2; }
+        app="$2"; shift 2 ;;
+      --no-mic) no_mic=1; shift ;;
+      --list-apps)
+        local bin
+        bin="$(ensure_record_app_helper)" || exit 1
+        exec "$bin" --list ;;
       *) extra_args+=("$1"); shift ;;
     esac
   done
+  if [[ "$no_mic" == 1 && -z "$app" ]]; then
+    log "--no-mic only applies with --app."
+    exit 2
+  fi
 
   mkdir -p "$RECORDINGS_DIR"
   local ts out
@@ -1265,18 +1406,23 @@ cmd_record() {
     out="$RECORDINGS_DIR/${ts}.m4a"
   fi
 
-  log "recording to $out — press Ctrl-C to stop (auto-stops after 3h)."
-  # Ctrl-C must stop ffmpeg (which finalizes the m4a) WITHOUT killing this
-  # script — a no-op INT trap keeps bash alive so verify + transcribe still run.
-  set +e
-  trap ':' INT
-  ffmpeg -hide_banner -loglevel warning -f avfoundation -i ":$REC_DEVICE" \
-    -ac 1 -c:a aac -b:a 96k -t 10800 -y "$out" </dev/null
-  rc=$?
-  trap - INT
-  set -e
-  if [[ "$rc" -ne 0 && "$rc" -ne 255 ]]; then
-    log "ffmpeg exited with an unexpected error (code $rc)."
+  rc=0
+  if [[ -n "$app" ]]; then
+    record_app_audio "$app" "$out" "$no_mic"
+  else
+    log "recording to $out — press Ctrl-C to stop (auto-stops after 3h)."
+    # Ctrl-C must stop ffmpeg (which finalizes the m4a) WITHOUT killing this
+    # script — a no-op INT trap keeps bash alive so verify + transcribe still run.
+    set +e
+    trap ':' INT
+    ffmpeg -hide_banner -loglevel warning -f avfoundation -i ":$REC_DEVICE" \
+      -ac 1 -c:a aac -b:a 96k -t 10800 -y "$out" </dev/null
+    rc=$?
+    trap - INT
+    set -e
+    if [[ "$rc" -ne 0 && "$rc" -ne 255 ]]; then
+      log "ffmpeg exited with an unexpected error (code $rc)."
+    fi
   fi
 
   if [[ ! -s "$out" ]]; then
