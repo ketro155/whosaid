@@ -75,8 +75,8 @@ threads miss everything posted since. A scrape at that point reports
 not in the DOM yet. Waiting for the row count to settle is not enough. The
 scraper has two guards:
 
-1. **Rail order.** Before it lists chats it samples the order of the mounted
-   rail rows (their `aria-label`s) and waits until it has been unchanged for
+1. **Rail order.** First, before the pill check and before listing chats, it
+   samples the order of the mounted rail rows (their `aria-label`s) and waits until it has been unchanged for
    20 s. The rail re-sorts when the sync lands, so a stable order is the
    freshness signal. It also waits until the tab is at least 30 s old
    (measured from `performance.timeOrigin`). The two waits overlap: a cold tab
@@ -129,7 +129,9 @@ All timings can be overridden by setting globals before injecting the file:
   chats, waits for the rail to settle, and records what it cleared in
   `window.__ts.pills`. If the chat count changed after clearing it sets
   `window.__ts.progress.warning`, so a run that would have skipped chats does not
-  look complete. It presses your pill(s) again when the scrape ends.
+  look complete. Both counts are taken after the readiness wait below, so a cold
+  tab whose cached rail grows when the sync lands does not raise a false warning.
+  It presses your pill(s) again when the scrape ends.
 - **Row time (issue #86, assumed, not re-verified):** a `<time datetime="ISO">`
   inside the chat row gives the chat's last activity. Only this machine-readable
   value is used, never relative text like "Yesterday".

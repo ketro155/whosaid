@@ -19,7 +19,10 @@ const CHATS = [
   { name: 'Retro (meeting chat)', meeting: true, unread: false },
 ];
 
-function buildWorld(initiallyPressed) {
+// growAfter (issue #86): a cold tab shows only the first 2 chats (cached rail)
+// for the first `growAfter` rail samples, then the synced full rail.
+function buildWorld(initiallyPressed, growAfter = 0) {
+  let railCalls = 0;
   const clicks = [];
   const pressed = new Set(initiallyPressed);
   const pills = ['Unread', 'Channels', 'Chats', 'Meeting chats'].map((label) => ({
@@ -29,7 +32,8 @@ function buildWorld(initiallyPressed) {
   }));
   const tree = { scrollTop: 0, clientHeight: 0, scrollHeight: 0 };
   function visibleRows() {
-    return CHATS.filter((c) => !(pressed.has('Chats') && c.meeting) && !(pressed.has('Unread') && !c.unread))
+    const rail = railCalls++ < growAfter ? CHATS.slice(0, 2) : CHATS;
+    return rail.filter((c) => !(pressed.has('Chats') && c.meeting) && !(pressed.has('Unread') && !c.unread))
       .map((c) => ({
         innerText: c.name,
         getAttribute: (a) => (a === 'aria-label' ? c.name : null),
@@ -55,8 +59,8 @@ function buildWorld(initiallyPressed) {
   return { ctx, window, clicks, pressed };
 }
 
-async function runScraper(initiallyPressed) {
-  const w = buildWorld(initiallyPressed);
+async function runScraper(initiallyPressed, growAfter) {
+  const w = buildWorld(initiallyPressed, growAfter);
   vm.runInContext(source, w.ctx);
   for (let i = 0; i < 2000 && !w.window.__ts.done; i++) await new Promise((r) => setTimeout(r, 2));
   assert.ok(w.window.__ts.done, 'scraper never finished');
@@ -94,5 +98,16 @@ async function runScraper(initiallyPressed) {
   assert.deepStrictEqual(c.clicks, ['Meeting chats', 'Meeting chats']);
   assert.ok(!c.window.__ts.progress.warning, 'unchanged count must not warn');
   console.log('ok C: unchanged count -> no warning, pill restored');
+
+  // Scenario D (issue #86): cold tab, rail grows from 2 cached chats to 4 during the
+  // readiness wait; the pill hides nothing -> both counts are settled, no false warning.
+  const d = await runScraper(['Meeting chats'], 3);
+  assert.strictEqual(d.window.__ts.pills.countBefore, 4, 'countBefore taken after readiness, got ' +
+    d.window.__ts.pills.countBefore);
+  assert.strictEqual(d.window.__ts.pills.countAfter, 4);
+  assert.ok(!d.window.__ts.progress.warning, 'rail growth during readiness must not warn, got: ' +
+    d.window.__ts.progress.warning);
+  assert.deepStrictEqual(d.clicks, ['Meeting chats', 'Meeting chats']);
+  console.log('ok D: cold tab rail growth during readiness -> no false pill warning');
   console.log('PASS');
 })().catch((e) => { console.error('FAIL: ' + (e && e.stack || e)); process.exit(1); });

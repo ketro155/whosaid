@@ -240,6 +240,10 @@
     // Issue #86: true when the row says the chat has activity newer than the thread shows.
     const looksStale = (rowAt, newest) => rowAt !== null && (newest === null || newest < rowAt - FRESH_TOLERANCE_MS);
     try {
+      // Issue #86: a cold tab can show last session's cached rail; wait for the sync
+      // first, so the pill counts below compare settled rails, not cached vs synced.
+      ts.progress = { phase: 'waiting-for-fresh-rail' };
+      ts.readiness = await waitForFreshRail();
       // Issue #57: a pressed filter pill (sticky per client) hides chats from the
       // rail. Count with the pill on, clear it, let the rail settle, count again.
       const pressed = pressedPills();
@@ -252,10 +256,6 @@
         await sleep(PILL_SETTLE_MS);              // wait for the rail to re-render
         if (tree) tree.scrollTop = 0;
       }
-      // Issue #86: a cold tab can show last session's cached rail; wait for the sync.
-      ts.progress = { phase: 'waiting-for-fresh-rail' };
-      ts.readiness = await waitForFreshRail();
-      if (tree) tree.scrollTop = 0;
       const chatNames = await enumerateChats();
       if (pressed.length) {
         ts.pills.countAfter = chatNames.length;
