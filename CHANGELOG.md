@@ -6,6 +6,8 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-10-16
+
 ### Added
 
 - **Calibrated realistic eval meetings** ([#80](https://github.com/sblattj/whosaid/issues/80)).
