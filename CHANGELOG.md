@@ -6,6 +6,12 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- **Listed in the MCP registry** as `io.github.sblattj/whosaid` (`server.json`): the PyPI package
+  runs as `uvx --from whosaid==<version> whosaid-mcp`. Bump `server.json`'s two versions with each
+  release, then `mcp-publisher publish`.
+
 ## [1.14.0] - 2026-10-16
 
 ### Added

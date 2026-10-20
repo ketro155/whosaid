@@ -1,0 +1,33 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sblattj/whosaid",
+  "title": "whosaid",
+  "description": "Local speaker-attributed transcription and meeting search for Apple Silicon. Audio stays on the Mac.",
+  "repository": {
+    "url": "https://github.com/sblattj/whosaid",
+    "source": "github"
+  },
+  "version": "1.14.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "whosaid",
+      "version": "1.14.0",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        { "type": "named", "name": "--from", "value": "whosaid==1.14.0" },
+        { "type": "positional", "value": "whosaid-mcp" }
+      ],
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "WHOSAID_WORKSPACE",
+          "description": "Absolute path to the meetings workspace the search tools read",
+          "isRequired": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}
