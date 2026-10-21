@@ -59,7 +59,7 @@
  * All timings are overridable via window.__TS_* globals set before injection.
  *
  * SCOPE: left-rail 1:1 and group chats only. Teams CHANNEL posts are a different
- * surface and are not covered. Text bodies plus inline images (below); reactions,
+ * surface, covered by teams-channel-scraper.js. Text bodies plus inline images (below); reactions,
  * file attachments and quoted-reply bodies are captured as plain text or dropped.
  *
  * IMAGES: inline pasted images are img[itemtype="http://schema.skype.com/AMSImage"]
