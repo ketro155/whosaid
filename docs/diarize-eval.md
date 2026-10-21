@@ -9,6 +9,8 @@ The voices are **TTS voices, not real people.** A result here shows how whosaid 
 clean, studio-quality synthetic speech with known turn boundaries. It does not predict accuracy
 on a real call, and you should not quote it as if it did. For headcounts from your own
 recordings, see [count-eval.md](count-eval.md).
+For the October 2026 survey of newer transcription and embedder models run through this
+harness, see [model-survey-2026-10.md](model-survey-2026-10.md).
 
 ## What leaves the machine
 
