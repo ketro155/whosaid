@@ -315,9 +315,11 @@ USAGE
 
 TRANSCRIBE FLAGS
   -o, --outdir DIR    Output directory (default: alongside each input file).
-  -m, --model REPO    HuggingFace mlx-community Whisper repo (default: turbo).
-      --accurate       Shorthand for mlx-community/whisper-large-v3-mlx (full
-                       large-v3; slower, best fidelity on names/numbers).
+  -m, --model REPO    HuggingFace mlx-community Whisper repo (default: large-v3).
+      --accurate       Shorthand for mlx-community/whisper-large-v3-mlx (the
+                       default; kept for scripts).
+      --fast           Shorthand for mlx-community/whisper-large-v3-turbo (about
+                       half the time; less stable on hard audio).
   -l, --lang CODE     Language code (default: en; use "auto" to auto-detect).
   -f, --format FMT    txt | srt | vtt | tsv | json | all (default: all).
   -n, --name NAME     Output base name (single input only; default: input basename).
@@ -607,7 +609,7 @@ WATCH
   whosaid memos shortcut-recipe                  How to build that Shortcut.
 
 ENV OVERRIDES
-  WHOSAID_MODEL        Default Whisper model repo.
+  WHOSAID_MODEL        Default Whisper model repo (default: large-v3; turbo repo = rollback).
   WHOSAID_LANG         Default language code.
   WHOSAID_VOICE_REFS   Directory of enrollment clips (default: ./voices).
   WHOSAID_SPEAKER_DB   Local speaker registry (default: ~/.config/whosaid/speakers.json).
@@ -796,8 +798,9 @@ cmd_doctor() {
 
   local hf_home
   hf_home="${HF_HOME:-$HOME/.cache/huggingface}"
-  if ls -d "$hf_home"/hub/models--mlx-community--whisper-large-v3-turbo* >/dev/null 2>&1; then
-    echo "✓ Whisper model cached (turbo) under $hf_home/hub"
+  local asr_model="${WHOSAID_MODEL:-mlx-community/whisper-large-v3-mlx}"
+  if ls -d "$hf_home/hub/models--${asr_model//\//--}"* >/dev/null 2>&1; then
+    echo "✓ Whisper model cached (${asr_model##*/}) under $hf_home/hub"
   else
     echo "✗ Whisper model not cached — fix: ./whosaid setup"
   fi
@@ -1463,7 +1466,7 @@ cmd_record() {
 cmd_transcribe() {
   [[ -f "$HELPER" ]] || { log "helper not found at $HELPER"; exit 1; }
 
-  local MODEL="${WHOSAID_MODEL:-mlx-community/whisper-large-v3-turbo}"
+  local MODEL="${WHOSAID_MODEL:-mlx-community/whisper-large-v3-mlx}"
   local LANG_CODE="$LANG_CODE_DEFAULT"
   local FORMAT="all"
   local OUTDIR=""
@@ -1489,6 +1492,7 @@ cmd_transcribe() {
       -o|--outdir)  OUTDIR="$2"; shift 2 ;;
       -m|--model)   MODEL="$2"; shift 2 ;;
       --accurate)   MODEL="mlx-community/whisper-large-v3-mlx"; shift ;;
+      --fast)       MODEL="mlx-community/whisper-large-v3-turbo"; shift ;;
       -l|--lang)    LANG_CODE="$2"; shift 2 ;;
       -f|--format)  FORMAT="$2"; shift 2 ;;
       -n|--name)    NAME="$2"; shift 2 ;;
@@ -1856,7 +1860,7 @@ cmd_ingest() {
       # transcribe flags that pass straight through
       -m|--model|-l|--lang|-f|--format|--speakers|--min-speakers|--max-speakers|--expected-speakers|--anchor-threshold|-j|--jobs|--chunk-seconds|--absorb-threshold|--placed-absorb-threshold|--match-threshold|--ref-threshold)
                       passthrough+=("$1" "$2"); shift 2 ;;
-      --accurate|--diarize|--no-diarize|--no-chunk)
+      --accurate|--fast|--diarize|--no-diarize|--no-chunk)
                       passthrough+=("$1"); shift ;;
       --)            shift; while [[ $# -gt 0 ]]; do AUDIO+=("$1"); shift; done ;;
       -h|--help)     cmd_help; exit 0 ;;

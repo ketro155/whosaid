@@ -69,8 +69,8 @@ WER on realistic meetings for that reason alone. DER, turn accuracy and names ar
 
 ## TODO (considered, not decided)
 
-- [ ] Change the default ASR model to `mlx-community/whisper-large-v3-mlx` (`whosaid` default,
-      README). Cost: about 1.85x transcription time on long meetings. Needs a release.
+- [x] Change the default ASR model to `mlx-community/whisper-large-v3-mlx` (`whosaid` default,
+      README). Cost: about 1.85x transcription time on long meetings. Needs a release. Done: default is now large-v3; `--fast` or `WHOSAID_MODEL` restores turbo.
 - [x] Fix realistic-meeting WER: give each turn the fragment's own text, or `None` so
       `score.py` skips WER for it. Fixed: realistic meetings now report no WER.
 - [ ] Retune thresholds for `nemo_en_titanet_large` on the tune sets, then score on val and

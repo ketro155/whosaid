@@ -45,7 +45,7 @@ test/cli_test.sh     # launcher wiring + an offline index/search/graph/wiki roun
 Checks, in order, loud on failure: macOS + `arm64` (hard fail — MLX requires Apple Silicon),
 Homebrew, `ffmpeg` and `uv` (offers `brew install` for missing ones; `--yes` skips prompts),
 ~4 GB free disk. Then pre-downloads everything so first use has no surprise waits: warms the `uv`
-environments, fetches the default Whisper model (`mlx-community/whisper-large-v3-turbo`, ~1.5 GB)
+environments, fetches the default Whisper model (`mlx-community/whisper-large-v3-mlx`, ~3 GB)
 via `huggingface_hub`, and fetches the sherpa segmentation + embedding models (~30 MB) via
 `lib/diarize_sherpa.py --ensure-models-only`. Idempotent — safe to re-run. Ends by pointing at
 `./whosaid enroll`.
@@ -91,7 +91,7 @@ The pipeline, per file:
    `<base>.speaker-cards.txt` (one card per speaker — turn count, talk time, representative
    snippets — to tell who each `SPEAKER_NN` is) plus a `<base>.diarization.json` sidecar (cached
    segments + per-cluster voiceprints).
-3. Flags: `-o/--outdir`, `-m/--model`, `--accurate` (full large-v3 instead of turbo),
+3. Flags: `-o/--outdir`, `-m/--model`, `--accurate` (full large-v3, the default), `--fast` (turbo),
    `-l/--lang`, `-f/--format`, `-n/--name`, `--speakers N`, `--no-diarize`, and the long-audio
    controls `--no-chunk`, `-j/--jobs`, `--chunk-seconds`.
    Env: `WHOSAID_MODEL`, `WHOSAID_LANG`, `WHOSAID_VOICE_REFS`, `WHOSAID_SPEAKER_DB`,

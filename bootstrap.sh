@@ -61,7 +61,7 @@ confirm() {
   [[ "$ans" =~ ^[Yy]$ ]]
 }
 
-MODEL="${WHOSAID_MODEL:-mlx-community/whisper-large-v3-turbo}"
+MODEL="${WHOSAID_MODEL:-mlx-community/whisper-large-v3-mlx}"
 
 # ---- 1. platform ---------------------------------------------------------------
 step 1 "checking platform"
@@ -162,7 +162,7 @@ else
   avail_kb="$(df -k "$HOME" | awk 'NR==2{print $4}')"
   avail_gb=$(( avail_kb / 1024 / 1024 ))
   if [[ "$avail_gb" -lt 4 ]]; then
-    log "WARNING: only ~${avail_gb} GB free on \$HOME; ~4 GB free disk is recommended (the Whisper model download is ~1.5 GB, plus working headroom)."
+    log "WARNING: only ~${avail_gb} GB free on \$HOME; ~4 GB free disk is recommended (the Whisper model download is ~3 GB, plus working headroom)."
     if ! confirm "continue anyway?"; then
       log "aborted — free up disk space and re-run."
       exit 1

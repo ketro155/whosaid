@@ -964,7 +964,8 @@ the absolute path to the `whosaid` script for `command` if it is not on the clie
 |---|---|
 | `-o, --outdir DIR` | Output directory (default: alongside the input file). |
 | `-m, --model NAME` | Whisper model to use. |
-| `--accurate` | Use the full `large-v3` model instead of the default `large-v3-turbo`. |
+| `--accurate` | Use the full `large-v3` model (the default; kept for scripts). |
+| `--fast` | Use `large-v3-turbo` for this run (faster, less stable on hard audio). |
 | `-l, --lang LANG` | Force the transcription language. |
 | `-f, --format FMT` | Output format: `txt`, `srt`, `vtt`, `tsv`, `json`, or `all`. |
 | `-n, --name NAME` | Override the output base name (single input only; default: derived from the input filename). |
@@ -1129,8 +1130,8 @@ guard above still applies. With no existing print, the cluster is saved as-is.
 ```
 
 Transcription and diarization run as two independent local stages that get merged at the end.
-Transcription uses MLX Whisper (`mlx-community/whisper-large-v3-turbo` by default, or the full
-`large-v3` with `--accurate`) on the Mac's GPU via Metal, through a hallucination-hardened decode
+Transcription uses MLX Whisper (the full `large-v3`, `mlx-community/whisper-large-v3-mlx`, by default, or
+`large-v3-turbo` with `--fast`) on the Mac's GPU via Metal, through a hallucination-hardened decode
 path: the temperature-fallback ladder stays enabled, `condition_on_previous_text` is turned off, and
 a hallucination-silence threshold keeps dead air from turning into repeated-token filler. Diarization
 runs on the CPU via sherpa-onnx offline diarization: pyannote's `segmentation-3.0` ONNX model finds
@@ -1138,6 +1139,12 @@ who's speaking when, a speaker-embedding model (NeMo TitaNet-small by default, c
 `DIARIZE_EMB_NAME`) embeds each turn, and clustering (optionally hinted by
 `--speakers N`) groups turns into speakers. Both diarization models are small (~30 MB total), ungated
 GitHub releases — no Hugging Face token required — cached locally in `~/.cache/sherpa-diarization/`.
+
+**Rolling back to turbo.** The default moved from `large-v3-turbo` to `large-v3` (steadier WER, about 1.85x
+the transcription time on long meetings). To restore turbo, pass `--fast` for one run, or set
+`WHOSAID_MODEL=mlx-community/whisper-large-v3-turbo` to make it persistent (`WHOSAID_MODEL` has always
+been the default-model override; an explicit `-m`, `--fast` or `--accurate` wins over it).
+
 Finally, every clip in `voices/` — plus every voiceprint in your local registry — is embedded the
 same way and matched to a cluster by cosine similarity (a match at or above `--match-threshold`,
 default 0.50, names the cluster);

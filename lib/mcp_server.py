@@ -358,8 +358,8 @@ def whosaid_transcribe(
     out = outdir or (os.path.dirname(audio) or ".")
 
     args = [audio, "--outdir", out, "--format", effective_format, "--lang", lang]
-    if accuracy == "accurate":
-        args.append("--accurate")
+    # whosaid defaults to large-v3, so "fast" must ask for turbo explicitly.
+    args.append("--accurate" if accuracy == "accurate" else "--fast")
     if speakers is not None and speakers >= 1:
         args += ["--speakers", str(speakers)]
     else:
@@ -1920,10 +1920,11 @@ Nothing — audio, text, or voice embeddings — ever leaves the machine.
 - `audio` → one input file. Output base = the basename with any char outside
   `[A-Za-z0-9_-]` mapped to `_` (so `v1.2` → `v1_2`).
 - `outdir` → `-o/--outdir DIR` (default: alongside the input).
-- `accuracy` → `"fast"` uses the default **turbo** model
-  (`mlx-community/whisper-large-v3-turbo`, ~1.5 GB, fastest); `"accurate"` passes
-  `--accurate` = full **large-v3** (`mlx-community/whisper-large-v3-mlx`, slower,
-  best fidelity on names/numbers).
+- `accuracy` → `"fast"` passes `--fast` = **turbo**
+  (`mlx-community/whisper-large-v3-turbo`, ~1.5 GB, about half the time, less
+  stable on hard audio); `"accurate"` passes `--accurate` = full **large-v3**
+  (`mlx-community/whisper-large-v3-mlx`, the whosaid CLI default, best fidelity on
+  names/numbers).
 - `format` → `-f/--format`: `txt | srt | vtt | tsv | json | all` (default `all`).
   Diarization needs the Whisper `.json`, so whosaid_transcribe silently upgrades
   any non-json/all format to `all` when `diarize=True`.
