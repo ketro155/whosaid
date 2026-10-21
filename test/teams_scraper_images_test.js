@@ -28,8 +28,14 @@ function buildWorld(msgs, knobs = {}) {
     click() { open = true; },
     closest: () => tree,
   };
+  // Before it loads, an image is either incomplete (complete=false) or, as seen live,
+  // a complete 1x1 placeholder (placeholder: true).
   function imgStub(i) {
     const loaded = harvests > (i.loadAfter || 0);
+    if (!loaded && i.placeholder) {
+      return { complete: true, naturalWidth: 1, naturalHeight: 1, __bytes: 1, __id: 'placeholder',
+        getAttribute: () => null };
+    }
     const attrs = { alt: 'image', 'data-gallery-src': 'https://example.invalid/' + i.id + '/full' };
     return {
       complete: loaded, naturalWidth: loaded ? i.w : 0, naturalHeight: loaded ? i.h : 0,
@@ -98,11 +104,14 @@ async function run(msgs, knobs) {
     { epoch: NOW - 5 * MIN, text: 'look at this', imgs: [{ id: 'one', w: 400, h: 300 }] },
     { epoch: NOW - 4 * MIN, text: '', imgs: [{ id: 'two', w: 10, h: 20 }, { id: 'late', w: 30, h: 40, loadAfter: 2 }] },
     { epoch: NOW - 3 * MIN, text: 'plain text' },
+    // The newest message: its image is a 1x1 placeholder for the whole back-scroll and only
+    // loads after it, so the scraper must come back for it.
+    { epoch: NOW - 2 * MIN, text: '', imgs: [{ id: 'newest', w: 50, h: 60, placeholder: true, loadAfter: 12 }] },
   ];
 
   // A: images captured as data URLs, an image-only message is kept, a lazy image fills in later.
   const a = await run(msgs);
-  assert.strictEqual(a.length, 3, 'image-only message must be kept');
+  assert.strictEqual(a.length, 4, 'image-only messages must be kept');
   assert.strictEqual(a[0].images.length, 1);
   assert.strictEqual(a[0].images[0].data, 'data:image/png;base64,' + 'A'.repeat(10) + '#one');
   assert.strictEqual(a[0].images[0].width, 400);
@@ -113,6 +122,8 @@ async function run(msgs, knobs) {
   assert.deepStrictEqual(a[1].images.map((i) => i.data.split('#')[1]), ['two', 'late'],
     'lazy image loaded on a later frame must be filled in');
   assert.ok(!('images' in a[2]), 'text-only message carries no images key');
+  assert.strictEqual(a[3].images[0].width, 50, 'a 1x1 placeholder is not a captured image');
+  assert.ok(a[3].images[0].data.endsWith('#newest'), 'placeholder image retried until it loads');
   console.log('ok A: images captured, image-only kept, lazy image filled');
 
   // B: __TS_IMAGES = false keeps the old text-only behavior.
@@ -127,4 +138,10 @@ async function run(msgs, knobs) {
   assert.strictEqual(c[0].images[0].data, null);
   assert.strictEqual(c[0].images[0].skipped, 'too-large');
   console.log('ok C: oversized image recorded without data');
+
+  // D (control for A): with no retry pass, the newest placeholder image stays uncaptured.
+  const d = await run(msgs, { __TS_IMAGE_RETRIES: 0 });
+  assert.strictEqual(d[3].images[0].data, null);
+  assert.strictEqual(d[3].images[0].skipped, 'not-loaded');
+  console.log('ok D: without the retry pass the placeholder is recorded as not-loaded');
 })().catch((e) => { console.error(e); process.exit(1); });

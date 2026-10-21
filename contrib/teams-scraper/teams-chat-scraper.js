@@ -91,6 +91,8 @@
   const IMAGES          = window.__TS_IMAGES !== false;
   const IMAGE_MAX_CHARS = Number(window.__TS_IMAGE_MAX_CHARS ?? 8000000);  // per-image data URL ceiling
   const IMAGE_SEL       = 'img[itemtype="http://schema.skype.com/AMSImage"]';
+  const IMAGE_RETRIES   = Number(window.__TS_IMAGE_RETRIES ?? 2);       // extra passes for images still loading
+  const IMAGE_RETRY_MS  = Number(window.__TS_IMAGE_RETRY_MS ?? 1500);   // wait at the newest end before each pass
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const qsa = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -150,7 +152,8 @@
   // images from same-origin blob: URLs, so the canvas is not tainted; this runs
   // synchronously, unlike fetch(), which can stall in a hidden tab.
   function imageData(img) {
-    if (!img.complete || !img.naturalWidth) return { data: null, skipped: 'not-loaded' };
+    // Teams shows a complete 1x1 placeholder until the blob arrives (seen live 2026-10-21).
+    if (!img.complete || img.naturalWidth < 4 || img.naturalHeight < 4) return { data: null, skipped: 'not-loaded' };
     try {
       const c = document.createElement('canvas');
       c.width = img.naturalWidth;
@@ -231,7 +234,8 @@
 
     let reachedCutoff = false;
     let noProgress = 0;
-    for (let frame = 0; frame < MAX_FRAMES; frame++) {
+    let frames = 0;
+    for (let frame = 0; frame < MAX_FRAMES; frame++, frames++) {
       harvestOpenThread(chatName, store, seen);
       const oldest = Math.min(...Array.from(store.values(), (m) => m.epoch), Infinity);
       if (Number.isFinite(oldest) && oldest < CUTOFF_MS) { reachedCutoff = true; break; }
@@ -245,6 +249,21 @@
         if (++noProgress >= NOPROG_STOP) break;
       } else {
         noProgress = 0;
+      }
+    }
+
+    // Images still loading (often the newest ones, left behind by the upward scroll):
+    // go back to the newest end, wait, and walk up the scrolled range again.
+    const pendingImages = () => Array.from(store.values()).some((m) => m.epoch >= CUTOFF_MS &&
+      m.images && m.images.some((i) => !i.data && i.skipped === 'not-loaded'));
+    for (let tries = 0; IMAGES && tries < IMAGE_RETRIES && pendingImages(); tries++) {
+      viewport.scrollTop = viewport.scrollHeight || 0;
+      await sleep(IMAGE_RETRY_MS);
+      harvestOpenThread(chatName, store, seen);
+      for (let f = 0; f < frames && pendingImages() && viewport.scrollTop > 0; f++) {
+        viewport.scrollTop = Math.max(0, viewport.scrollTop - viewport.clientHeight * STEP_FRAC);
+        await sleep(SETTLE_MS);
+        harvestOpenThread(chatName, store, seen);
       }
     }
 

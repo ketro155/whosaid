@@ -166,7 +166,10 @@ rendered them. A message holding only images is kept with `text` `""`:
              "data": "data:image/png;base64,..."}]}
 ```
 
-`data` is `null` with `skipped` set to `not-loaded`, `too-large` (over
+Teams shows a 1x1 placeholder until an image's blob arrives, so after the
+back-scroll the scraper returns to the newest end and walks up again for any
+image still loading (`window.__TS_IMAGE_RETRIES`, default 2). `data` is `null`
+with `skipped` set to `not-loaded`, `too-large` (over
 `window.__TS_IMAGE_MAX_CHARS`, default 8,000,000 characters) or `error: ...`.
 Ingest writes each image to `<folder>/teams-images/<epoch>-<n>.png` and appends
 `[image: teams-images/<epoch>-<n>.png]` to the message in `teams.speakers.txt`
