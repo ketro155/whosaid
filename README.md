@@ -767,6 +767,17 @@ there is no `--force` path that does. `shortcut-recipe` builds and signs that Sh
 when signing is available; on a Mac with no iCloud account it prints the one-action recipe to
 build by hand in the Shortcuts app (`--no-sign` prints the recipe only).
 
+## A/B a setting on your own recording: `whosaid ab`
+
+```bash
+whosaid ab standup.m4a --a "--speakers 2" --b "" --same-asr   # one transcription, two diarizations
+whosaid ab --compare run-old/ run-new/                        # compare two existing output dirs
+```
+
+Runs whosaid twice on a copy of your speaker registry (nothing is learned or ingested) and
+reports speaker counts, talk shares, word agreement, the biggest disagreements and name
+agreement, with no ground truth needed. Details: [docs/ab-compare.md](docs/ab-compare.md).
+
 ## Dev-commitments
 
 A dev-commitment is a first-person promise the **self**-roled speaker made to someone else

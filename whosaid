@@ -238,6 +238,17 @@ USAGE
                                         recording, so you can listen and confirm
                                         an identity before trusting an auto-label
                                         or enrolling.
+  whosaid ab <audio> --a "<flags>" --b "<flags>" [-o DIR] [--same-asr]
+             [--env-a K=V ...] [--env-b K=V ...] [--keep-registry-writes]
+  whosaid ab --compare DIR_A DIR_B [-o DIR]
+                                        A/B two settings on YOUR recording, no
+                                        ground truth needed. Runs whosaid twice on
+                                        a copy of the speaker registry (nothing is
+                                        learned or ingested), then reports speaker
+                                        counts, talk shares, word agreement, the
+                                        biggest disagreements and name agreement.
+                                        --same-asr transcribes once (diarization-
+                                        only A/B). See docs/ab-compare.md.
   whosaid teams ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]
                                         Fold a Microsoft Teams chat export (JSON
                                         hand-off from the DOM scraper) into the
@@ -1785,6 +1796,16 @@ cmd_samples() {
   "$WHOSAID_PY" "$REPO_DIR/lib/samples.py" "${pyargs[@]}"
 }
 
+# whosaid ab <audio> --a "<flags>" --b "<flags>" | whosaid ab --compare DIR_A DIR_B
+# A/B two settings on one recording (lib/ab_compare.py, stdlib only).
+cmd_ab() {
+  if want_help "$@"; then cmd_help; exit 0; fi
+  local ab_py="$REPO_DIR/lib/ab_compare.py"
+  require_module "$ab_py" ab
+  [[ -n "$WHOSAID_PY" ]] || { log "ab: no usable python found"; exit 1; }
+  WHOSAID_AB_BIN="${WHOSAID_AB_BIN:-$REPO_DIR/whosaid}" exec "$WHOSAID_PY" "$ab_py" "$@"
+}
+
 # whosaid teams ingest <export.json> --into DIR [--tz ZONE] [--self NAME] [--dry-run]
 # whosaid teams ingest-transcript <transcript.json> --into DIR [--start ISO] [--title T] [...]
 # Non-audio adapters (issue #49): chats in lib/teams_chat.py, meeting transcripts in
@@ -2333,6 +2354,9 @@ case "${1:-}" in
     ;;
   samples)
     cmd_samples "${@:2}"
+    ;;
+  ab)
+    cmd_ab "${@:2}"
     ;;
   speakers)
     cmd_speakers "${@:2}"
