@@ -150,8 +150,9 @@ out and loses its return value.
 
 ## Scope
 
-- Left-rail 1:1 and group chats only. Channel posts are a different surface and
-  are not covered.
+- Left-rail 1:1 and group chats only. Channel posts are a different surface;
+  use [`teams-channel-scraper.js`](teams-channel-scraper.js) for them (see
+  *Channel posts* below).
 - Text bodies plus inline images (see *Images* below). Reactions, file
   attachments and quoted-reply bodies are flattened to text or dropped.
 
@@ -177,6 +178,46 @@ Ingest writes each image to `<folder>/teams-images/<epoch>-<n>.png` and appends
 paths under `images`. A later scrape without the data keeps the earlier
 references. Set `window.__TS_IMAGES = false` before injecting to stay text-only.
 Images stay on disk next to the transcript; nothing is uploaded.
+
+## Channel posts
+
+[`teams-channel-scraper.js`](teams-channel-scraper.js) covers team channels:
+the root posts and their replies, including replies Teams hides behind
+"Open N replies". It works like the chat scraper, but its handle is
+`window.__tsc`, and it emits the same `raw_by_chat` shape keyed by
+`"<Team> > <Channel>"`, so `whosaid teams ingest` reads it unchanged.
+
+1. Optionally set `window.__TS_CUTOFF_DAYS` (default 7) and
+   `window.__TS_CHANNELS = ['substring', ...]` to limit the run to matching
+   `"<Team> > <Channel>"` names.
+2. Evaluate the file, then poll `window.__tsc.done` and
+   `JSON.stringify(window.__tsc.progress)` with short calls.
+3. Save `JSON.stringify(window.__tsc.result)` and run `whosaid teams ingest` on it.
+
+How it reads a channel:
+
+- It presses the **Channels** pill, lists every
+  `[data-item-type="channel"]` row (`data-testid="sc-channel-list-item-<threadId>"`;
+  favorites repeat and are skipped), and puts the user's pills back at the end.
+- Each message is the element carrying both `data-mid` (epoch ms) and
+  `data-reply-chain-id` (the root's mid). The author header `#author-<mid>` only
+  appears on the first message of a same-author run, so the author is carried
+  forward within a thread.
+- An inline post shows only its last 3 replies. When any visible message of a
+  thread is inside the cutoff, the scraper clicks
+  `[data-tid="response-summary-button"]`, scrapes
+  `[data-tid="channel-replies-viewport"]`, and returns with
+  `[data-tid="close-l2-view-button"]` ("Go to channel").
+- An old post can get a new reply, so the back-scroll goes past the cutoff by
+  `window.__TS_CHANNEL_GRACE_DAYS` (default 30) before it stops.
+- Each record also carries `chat_id` (the channel thread id, so two "General"
+  channels never merge), `is_reply`, `thread_root_epoch` and `reply_to`. The
+  speakers file drops unknown fields, so reply text starts with
+  `(reply to <author>, post of <ISO>)`; set `window.__TS_REPLY_PREFIX = false` to
+  turn that off.
+
+Verified on 2026-10-21 against a 6-message thread (3 replies hidden) plus a
+post with one reply: all 8 messages, with the right authors.
 
 ## Meeting transcripts
 
