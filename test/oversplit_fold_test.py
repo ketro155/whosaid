@@ -174,6 +174,35 @@ def test_brief_guest_keeps_own_label():
           f"{seg_est}")
 
 
+def test_guest_with_inherited_fragments_stays_uncounted():
+    # Real pipeline failure: un-embedded sub-0.5 s fragments inherit the nearest
+    # embedded label in time, which pushed 0.6-0.8 s guest labels past 1.0 s of
+    # talk, so they were counted (headcount 5 for 2 people).
+    X, dur, groups = fixture()
+    segs = segments(X, dur)
+    g = groups.index("guest")
+    end = segs[g]["end"]
+    segs.append({"start": end + 0.05, "end": end + 0.45})   # no "emb": inherits by time
+    segs.append({"start": end + 0.50, "end": end + 0.90})
+    with recovery_env(None):
+        out, _emb, speakers, est, _ = d.cluster_segments(copy.deepcopy(segs), -1)
+    guest_sp = next(s["speaker"] for s in out if s["start"] == segs[g]["start"])
+    talk = sum(s["end"] - s["start"] for s in out if s["speaker"] == guest_sp)
+    check(talk > d.UNCOUNTED_MAX_TALK_SECONDS, f"fragments inherited past 1 s: {talk:.2f}")
+    check(guest_sp in est["guest_labels"], f"guest label recorded: {est.get('guest_labels')}")
+    # Control: by talk alone the guest would be counted.
+    check(guest_sp not in d.uncounted_clusters(out, {}, speakers), "control: talk rule counts it")
+    unc = d.uncounted_clusters(out, {}, speakers, always=est["guest_labels"])
+    check(guest_sp in unc and len(speakers) - len(unc) == 2, f"guest stays uncounted: {unc}")
+    # A guest label that gets a name is counted, like any named cluster.
+    unc = d.uncounted_clusters(out, {guest_sp: "Guest"}, speakers, always=est["guest_labels"])
+    check(guest_sp not in unc and len(speakers) - len(unc) == 3, "named guest is counted")
+    # Legacy mode mints no guest labels and records none.
+    with recovery_env("legacy"):
+        est = d.cluster_segments(copy.deepcopy(segs), -1)[3]
+    check("guest_labels" not in est, f"legacy records no guest labels: {est}")
+
+
 def test_legacy_env_restores_hint_only():
     X, dur, _ = fixture()
     with recovery_env("legacy"):
@@ -222,6 +251,7 @@ if __name__ == "__main__":
     test_same_voice_minors_fold_to_two()
     test_distinct_third_voice_survives()
     test_brief_guest_keeps_own_label()
+    test_guest_with_inherited_fragments_stays_uncounted()
     test_legacy_env_restores_hint_only()
     test_max_speakers_path_unchanged()
     test_helper_edges()

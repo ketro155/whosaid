@@ -102,9 +102,11 @@ against the first person and under 0.30 against the second. The count is now 2.
 A distinct third voice still counts. A voice with 5% or more of the talk is
 never minor, and a minor voice that is far from everyone is not folded. When
 turns are assigned to speakers, a turn under 1 s that is far from every voice
-(cosine under 0.40) keeps a label of its own. Under 1 s of talk such a label is
-left out of the headcount, so a brief guest keeps their words without adding a
-phantom speaker.
+(cosine under 0.40) keeps a label of its own. Such a guest label is always left
+out of the headcount, even when very short un-embedded fragments next to it raise
+its talk past 1 s. Its words stay in the transcript and the RTTM, it is listed in
+the sidecar's `uncounted` (and `count_estimate.guest_labels`, so `relabel` keeps it
+uncounted), and it counts as soon as you give it a name.
 
 To get the old behavior back (`k` left at the bound, `--max-speakers N` only
 hinted), set `WHOSAID_COUNT_RECOVERY=legacy`. The variable is read on every run.

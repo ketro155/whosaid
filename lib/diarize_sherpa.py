@@ -407,20 +407,33 @@ BRIEF_VOICE_GATE = 0.40
 # 20 -> 22 of 32. A 2.0 s cut hid 13 / 12 fragments but also 3 / 6 real guests
 # (20 -> 22 / 20 -> 21), so the cut stays at 1.0 s. If every cluster would be
 # uncounted (a clip that is all brief), none is, so the headcount is never 0.
+#
+# GUEST labels (count_estimate["guest_labels"]) are uncounted whatever their
+# talk. The substantive-count recovery mints one per sub-1 s turn far from every
+# voice (cluster_estimated); none of them can hold an embedded turn >= 1 s. Their
+# talk can still pass 1.0 s once un-embedded sub-0.5 s fragments inherit the
+# nearest embedded label in time: on a real 2-person recording three of them
+# reached 1.15-1.37 s that way and the headcount came out 5. A guest label that
+# gets a name is counted, like any named cluster.
 UNCOUNTED_MAX_TALK_SECONDS = 1.0
 
 
-def uncounted_clusters(segs: list, names: dict, speakers: list | None = None) -> list:
+def uncounted_clusters(segs: list, names: dict, speakers: list | None = None,
+                       always=None) -> list:
     """Sorted anonymous SPEAKER_NN labels whose total talk is under
-    UNCOUNTED_MAX_TALK_SECONDS. Talk is rounded to the RTTM's millisecond so a
-    cluster of exactly 1.0 s (e.g. 5.3 - 4.3) is counted despite float error."""
+    UNCOUNTED_MAX_TALK_SECONDS, plus anonymous labels in `always` (guest labels
+    of the substantive-count recovery) whatever their talk. Talk is rounded to
+    the RTTM's millisecond so a cluster of exactly 1.0 s (e.g. 5.3 - 4.3) is
+    counted despite float error."""
     if speakers is None:
         speakers = sorted({s["speaker"] for s in segs})
+    always = set(always or ())
     talk = {sp: 0.0 for sp in speakers}
     for s in segs:
         talk[s["speaker"]] = talk.get(s["speaker"], 0.0) + (s["end"] - s["start"])
     out = sorted(sp for sp in speakers
-                 if names.get(sp, sp) == sp and round(talk[sp], 3) < UNCOUNTED_MAX_TALK_SECONDS)
+                 if names.get(sp, sp) == sp
+                 and (sp in always or round(talk[sp], 3) < UNCOUNTED_MAX_TALK_SECONDS))
     return [] if len(out) >= len(speakers) else out
 
 
@@ -825,8 +838,11 @@ def estimate_speakers(X: np.ndarray, thresh: float = AGGLOM_THRESHOLD,
     }
 
 
-def cluster_estimated(X, estimate, durations):
-    """Fit recovered counts on reliable turns, then assign every original turn."""
+def cluster_estimated(X, estimate, durations, guest_out: list | None = None):
+    """Fit recovered counts on reliable turns, then assign every original turn.
+
+    `guest_out`, when a list, receives the label ids minted for far-away brief
+    turns on the substantive-count path (always uncounted: uncounted_clusters)."""
     if estimate.get("fallback"):
         reliable = np.flatnonzero(np.asarray(durations) >= 1.0)
         R = X[reliable]
@@ -841,12 +857,15 @@ def cluster_estimated(X, estimate, durations):
         if estimate["fallback"].get("method") == "substantive-count":
             # Guest preservation: a sub-1 s turn far from every substantive voice
             # gets a label of its own instead of being pinned onto someone else.
-            # Under 1 s of talk it is uncounted (UNCOUNTED_MAX_TALK_SECONDS), so
-            # it keeps its words without inflating the headcount.
+            # Such a label is always uncounted (cluster_segments records it in
+            # estimate["guest_labels"]), so it keeps its words without
+            # inflating the headcount.
             far = np.flatnonzero((np.asarray(durations) < 1.0)
                                  & (np.max(sims, axis=1) < BRIEF_VOICE_GATE))
             for j, i in enumerate(far):
                 out[i] = len(centers) + j
+                if guest_out is not None:
+                    guest_out.append(int(out[i]))
         return out
     return spherical_kmeans(X, estimate["k"])
 
@@ -969,6 +988,7 @@ def cluster_segments(all_segments: list, num_speakers: int, min_speakers: int = 
     durations = np.array([s["end"] - s["start"] for s in embedded])
     estimate = None
     anchor_info = None
+    guests: list = []   # internal cluster ids of substantive-count guest labels
 
     if anchors:
         if anchor_threshold is None:
@@ -1011,8 +1031,10 @@ def cluster_segments(all_segments: list, num_speakers: int, min_speakers: int = 
                 estimate["residual_turns"] = int(len(residual))
             k_res = max(1, min(k_res, len(residual)))
             log(f"  residual clustering: {len(residual)} turn(s) -> {k_res} new speaker(s)")
-            rlabels = (cluster_estimated(Xr, est, durations[residual]) if estimate is not None
-                       else spherical_kmeans(Xr, k_res))
+            rguests: list = []
+            rlabels = (cluster_estimated(Xr, est, durations[residual], guest_out=rguests)
+                       if estimate is not None else spherical_kmeans(Xr, k_res))
+            guests = [n_anchor + g for g in rguests]
             for i, lab in zip(residual, rlabels):
                 cid[i] = n_anchor + int(lab)
 
@@ -1048,7 +1070,7 @@ def cluster_segments(all_segments: list, num_speakers: int, min_speakers: int = 
         # identical given the same k, and its reassignment step recovers turns that
         # average linkage chained into a neighbour.
         log(f"global clustering: {len(embedded)} embedded turns -> {k} speaker(s)")
-        labels = (cluster_estimated(X, est, durations) if estimate is not None
+        labels = (cluster_estimated(X, est, durations, guest_out=guests) if estimate is not None
                   else spherical_kmeans(X, k))
         for s, lab in zip(embedded, labels):
             s["_c"] = int(lab)
@@ -1080,6 +1102,9 @@ def cluster_segments(all_segments: list, num_speakers: int, min_speakers: int = 
 
     segs = [{"start": s["start"], "end": s["end"], "speaker": relabel[s["_c"]]} for s in all_segments]
     segs.sort(key=lambda s: s["start"])
+    if estimate is not None and guests:
+        # Persisted in the sidecar's count_estimate so relabel keeps them uncounted.
+        estimate["guest_labels"] = sorted(relabel[c] for c in set(guests) if c in relabel)
 
     if anchor_info is not None:
         # Map the internal anchor cluster ids onto the SPEAKER_NN labels the rest
@@ -2175,7 +2200,9 @@ def do_relabel(args) -> None:
         if entry:
             roles[nm] = entry["role"]
 
-    uncounted = uncounted_clusters(segs, names, speakers)
+    ce = data.get("count_estimate")   # a dict, or a bare count / None in older sidecars
+    uncounted = uncounted_clusters(segs, names, speakers,
+                                   always=ce.get("guest_labels") if isinstance(ce, dict) else None)
     num_counted = len(speakers) - len(uncounted)
     data["num_speakers"] = num_counted
     data["uncounted"] = uncounted
@@ -2606,7 +2633,8 @@ def main() -> None:
                 roles[nm] = entry["role"]
 
     # ---- nameless clusters with under UNCOUNTED_MAX_TALK_SECONDS of talk (#69) ----
-    uncounted = uncounted_clusters(segs, names, speakers)
+    uncounted = uncounted_clusters(segs, names, speakers,
+                                   always=(count_estimate or {}).get("guest_labels"))
     num_counted = len(speakers) - len(uncounted)
 
     # ---- render RTTM + speaker-labeled transcript + snippet cards ----
