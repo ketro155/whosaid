@@ -47,7 +47,8 @@ or `{"messages": [...]}`. Each record's fields:
 | `author` | Author display name, as Teams renders it. |
 | `epoch` (or `epoch_ms`) | The message's `data-mid`: epoch milliseconds, and the dedup key. |
 | `ts` (or `timestamp_iso`) | The same instant as ISO 8601. It is used only when there is no epoch. |
-| `text` | The message body as plain text. |
+| `text` | The message body as plain text (`""` for an image-only message). |
+| `images` | Optional: inline images, see *Images* below. |
 | `chat_id`, `url` | Optional: the Teams conversation id and page URL. |
 
 Records may be unsorted and may repeat. Ingest dedups on the epoch, so
@@ -151,8 +152,28 @@ out and loses its return value.
 
 - Left-rail 1:1 and group chats only. Channel posts are a different surface and
   are not covered.
-- Text bodies only. Reactions, attachments, images and quoted-reply bodies are
-  flattened to text or dropped.
+- Text bodies plus inline images (see *Images* below). Reactions, file
+  attachments and quoted-reply bodies are flattened to text or dropped.
+
+## Images
+
+Inline pasted images (`img[itemtype="http://schema.skype.com/AMSImage"]`) are
+copied through a canvas into a PNG data URL on the message, at the size Teams
+rendered them. A message holding only images is kept with `text` `""`:
+
+```json
+{"images": [{"alt": "image", "src": "<full-size AMS URL>", "width": 379, "height": 800,
+             "data": "data:image/png;base64,..."}]}
+```
+
+`data` is `null` with `skipped` set to `not-loaded`, `too-large` (over
+`window.__TS_IMAGE_MAX_CHARS`, default 8,000,000 characters) or `error: ...`.
+Ingest writes each image to `<folder>/teams-images/<epoch>-<n>.png` and appends
+`[image: teams-images/<epoch>-<n>.png]` to the message in `teams.speakers.txt`
+(`[image not captured]` when there was no data); the sidecar segment lists the
+paths under `images`. A later scrape without the data keeps the earlier
+references. Set `window.__TS_IMAGES = false` before injecting to stay text-only.
+Images stay on disk next to the transcript; nothing is uploaded.
 
 ## Meeting transcripts
 

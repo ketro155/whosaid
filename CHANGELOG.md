@@ -8,6 +8,12 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ### Added
 
+- **Teams chat images.** The Teams chat scraper now copies inline pasted images (through a
+  canvas, as PNG data URLs), and `whosaid teams ingest` saves them to
+  `<folder>/teams-images/<epoch>-<n>.png` with an `[image: ...]` reference in
+  `teams.speakers.txt` and an `images` list on the sidecar segment. Image-only messages are
+  kept. `window.__TS_IMAGES = false` keeps the old text-only scrape.
+
 - **Listed in the MCP registry** as `io.github.sblattj/whosaid` (`server.json`): the PyPI package
   runs as `uvx --from whosaid==<version> whosaid-mcp`. Bump `server.json`'s two versions with each
   release, then `mcp-publisher publish`.

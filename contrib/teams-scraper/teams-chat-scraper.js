@@ -14,7 +14,7 @@
  *
  * OUTPUT (window.__ts.result): raw_by_chat, a map keyed by chat display name:
  *   { "<chat name>": { chat, harvested, kept, reachedCutoff, messages:[
- *       { chat, author, ts, epoch, text } ... ] } }
+ *       { chat, author, ts, epoch, text, images? } ... ] } }
  * The driver then flattens every chat's messages into one chronological list
  * (messages.json / messages.ndjson) and renders rollup.md. epoch (ms, from the
  * message data-mid) is the stable dedup + cutoff key.
@@ -59,8 +59,16 @@
  * All timings are overridable via window.__TS_* globals set before injection.
  *
  * SCOPE: left-rail 1:1 and group chats only. Teams CHANNEL posts are a different
- * surface and are not covered. Text bodies only (reactions/attachments/images and
- * quoted-reply bodies are captured as plain text or dropped).
+ * surface and are not covered. Text bodies plus inline images (below); reactions,
+ * file attachments and quoted-reply bodies are captured as plain text or dropped.
+ *
+ * IMAGES: inline pasted images are img[itemtype="http://schema.skype.com/AMSImage"]
+ * inside the body, rendered from a same-origin blob: URL (verified 2026-10-21).
+ * Each loaded one is drawn to a canvas and kept as a PNG data URL on the message:
+ *   images: [{ alt, src (data-gallery-src, the full-size AMS URL, needs auth), width,
+ *              height, data (data URL | null), skipped? ('not-loaded' | 'too-large' | 'error: ...') }]
+ * A message holding only images is kept with text "". The data is the size Teams
+ * rendered, not the full-size original. window.__TS_IMAGES = false turns this off.
  */
 
 (function installTeamsScraper() {
@@ -79,6 +87,10 @@
   const READY_MAX_MS       = Number(window.__TS_READY_MAX_MS ?? 120000);      // give up waiting (and warn)
   const FRESH_TOLERANCE_MS = Number(window.__TS_FRESH_TOLERANCE_MS ?? 60000); // row time vs newest message slack
   const REFRESH_WAIT_MS    = Number(window.__TS_REFRESH_WAIT_MS ?? 5000);     // wait before the one re-harvest
+  // Inline images: copy each loaded AMS image to a PNG data URL (window.__TS_IMAGES = false turns it off).
+  const IMAGES          = window.__TS_IMAGES !== false;
+  const IMAGE_MAX_CHARS = Number(window.__TS_IMAGE_MAX_CHARS ?? 8000000);  // per-image data URL ceiling
+  const IMAGE_SEL       = 'img[itemtype="http://schema.skype.com/AMSImage"]';
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const qsa = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -134,6 +146,40 @@
     return r;
   }
 
+  // Copy one rendered image to a PNG data URL through a canvas. Teams renders AMS
+  // images from same-origin blob: URLs, so the canvas is not tainted; this runs
+  // synchronously, unlike fetch(), which can stall in a hidden tab.
+  function imageData(img) {
+    if (!img.complete || !img.naturalWidth) return { data: null, skipped: 'not-loaded' };
+    try {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      const data = c.toDataURL('image/png');
+      return data.length > IMAGE_MAX_CHARS ? { data: null, skipped: 'too-large' } : { data, skipped: null };
+    } catch (e) {
+      return { data: null, skipped: 'error: ' + String(e && e.message || e) };
+    }
+  }
+
+  // The inline images of one message body, in DOM order. [] when capture is off.
+  function harvestImages(root) {
+    if (!IMAGES || !root || typeof root.querySelectorAll !== 'function') return [];
+    return Array.from(root.querySelectorAll(IMAGE_SEL), (img) => {
+      const { data, skipped } = imageData(img);
+      const rec = {
+        alt: img.getAttribute('alt') || '',
+        src: img.getAttribute('data-gallery-src') || img.getAttribute('data-orig-src') || null,
+        width: img.naturalWidth || null,
+        height: img.naturalHeight || null,
+        data,
+      };
+      if (skipped) rec.skipped = skipped;
+      return rec;
+    });
+  }
+
   // Harvest every message currently in the DOM of the open thread into `store`
   // (Map data-mid -> record). Returns the count of NEW messages added this frame.
   // `seen.maxMid` tracks the newest data-mid in the DOM, text or not (issue #86:
@@ -153,15 +199,24 @@
       if (seen && !(epoch <= seen.maxMid)) seen.maxMid = epoch;
       const contentEl = item.querySelector('[id^="content-"]');
       const text = (contentEl ? contentEl.innerText : msg.innerText || '').trim();
-      if (!text) continue;
-      if (store.has(mid)) continue;
-      store.set(mid, {
+      const have = store.get(mid);
+      // Images lazy-load: an image missing its data on an earlier frame may be ready now.
+      if (have && !(have.images && have.images.some((i) => !i.data && i.skipped === 'not-loaded'))) continue;
+      const images = harvestImages(contentEl || msg);
+      if (have) {
+        images.forEach((img, i) => { if (img.data && have.images[i] && !have.images[i].data) have.images[i] = img; });
+        continue;
+      }
+      if (!text && !images.length) continue;
+      const rec = {
         chat: chatName,
         author: lastAuthor || '(unknown)',
         ts: new Date(epoch).toISOString(),
         epoch,
         text,
-      });
+      };
+      if (images.length) rec.images = images;
+      store.set(mid, rec);
       added++;
     }
     return added;

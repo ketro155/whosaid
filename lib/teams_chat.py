@@ -14,6 +14,12 @@ Input is a hand-off file: a list of message records, an object
 (ISO 8601) as the fallback clock, plus optional "chat_id", "url". epoch_ms wins
 over epoch. Records may be unsorted and duplicated (epoch dedups).
 
+A record may carry "images": [{"alt", "src", "width", "height", "data" (data URL or
+null), "skipped"}] from the scraper's inline image capture. Each captured image is
+written to <folder>/teams-images/<epoch_ms>-<n>.<ext> and the message text gets an
+"[image: teams-images/<file>]" reference ("[image not captured]" when there is no
+data and no earlier file); a message holding only images is kept.
+
 The same ingest serves Outlook mail (contrib/outlook-scraper): with --source outlook
 the files are outlook.speakers.txt / outlook.diarization.json, source.kind is
 "outlook-mail", "chat" is the thread subject and "chat_id" the conversation id.
@@ -29,6 +35,8 @@ Re-ingest is idempotent: an existing folder holding the same chat-day is merged
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import re
@@ -73,6 +81,10 @@ SIDECAR_NAME = TEAMS.sidecar_name
 KIND = TEAMS.kind
 SCRAPER = TEAMS.scraper
 DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{4}(?:-\d+)?$")
+IMAGE_REF_RE = re.compile(r"\[image: ([^\]]+)\]")
+NOT_CAPTURED = "[image not captured]"
+DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,(.*)$", re.S)
+IMAGE_EXT = {"png": "png", "jpeg": "jpg", "gif": "gif", "webp": "webp"}
 
 
 class TeamsError(Exception):
@@ -179,6 +191,9 @@ def load_export(path: str | os.PathLike) -> list[dict]:
         chat = _one_line(rec["chat"])
         if not chat:
             raise TeamsError(f"message {i}: 'chat' is empty")
+        images = rec.get("images") or []
+        if not isinstance(images, list) or not all(isinstance(x, dict) for x in images):
+            raise TeamsError(f"message {i}: 'images' must be a list of objects")
         out.append({
             "chat": chat,
             "chat_id": rec.get("chat_id") or env_chat_id or None,
@@ -186,6 +201,7 @@ def load_export(path: str | os.PathLike) -> list[dict]:
             "author": rec["author"],
             "epoch_ms": ms,
             "text": rec["text"],
+            "images": images,
         })
     # A chat whose records carry a chat_id on only some of them is one chat:
     # propagate the first id (and url) seen for each chat name to the rest.
@@ -275,18 +291,20 @@ def chat_identity(chat_id: str | None, chat_name: str) -> str:
 
 def group_chat_days(records: list[dict], tz: tzinfo, name_map: dict[str, str]) -> list[dict]:
     """Group records into chat-days. Each group:
-    {chat_name, chat_id, url, day, messages: {epoch_ms: (speaker, display, text)}, names: {display: canonical}}.
-    Dedups on epoch_ms (last record wins); drops messages empty after whitespace collapse."""
+    {chat_name, chat_id, url, day, messages: {epoch_ms: (speaker, text)}, images: {epoch_ms: [image]},
+    names: {display: canonical}}. Dedups on epoch_ms (last record wins); drops messages with
+    no text after whitespace collapse and no images."""
     groups: dict[tuple[str, str], dict] = {}
     for rec in records:
         text = clean_text(rec["text"])
-        if not text:
+        images = rec.get("images") or []
+        if not text and not images:
             continue
         day = local_dt(rec["epoch_ms"], tz).strftime("%Y-%m-%d")
         ident = chat_identity(rec["chat_id"], rec["chat"])
         g = groups.setdefault((ident, day), {
             "chat_name": rec["chat"], "chat_id": rec["chat_id"], "url": rec["url"],
-            "day": day, "messages": {}, "names": {},
+            "day": day, "messages": {}, "images": {}, "names": {},
         })
         if rec["chat_id"] and not g["chat_id"]:
             g["chat_id"] = rec["chat_id"]
@@ -294,6 +312,10 @@ def group_chat_days(records: list[dict], tz: tzinfo, name_map: dict[str, str]) -
             g["url"] = rec["url"]
         speaker = resolve_speaker(rec["author"], name_map)
         g["messages"][rec["epoch_ms"]] = (speaker, text)
+        if images:
+            g["images"][rec["epoch_ms"]] = images
+        else:
+            g["images"].pop(rec["epoch_ms"], None)
         g["names"][_one_line(rec["author"])] = speaker
     return sorted(groups.values(), key=lambda g: (g["day"], min(g["messages"])))
 
@@ -346,6 +368,56 @@ def existing_messages(sidecar: dict | None) -> dict[int, tuple[str, str]]:
     return out
 
 
+# ---- inline images ----------------------------------------------------------------------
+
+def image_dir_name(src: Source = TEAMS) -> str:
+    return f"{src.base}-images"
+
+
+def decode_data_url(data) -> tuple[str, bytes] | None:
+    """'data:image/png;base64,...' -> (ext, bytes); None for anything else."""
+    m = DATA_URL_RE.match(data) if isinstance(data, str) else None
+    if not m:
+        return None
+    try:
+        return IMAGE_EXT[m.group(1)], base64.b64decode(m.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def attach_images(folder: Path, epoch_ms: int, text: str, images: list[dict], *,
+                  write: bool, src: Source = TEAMS) -> str:
+    """Write a message's captured images under <folder>/<base>-images/ and return the
+    text with one reference per image. An image with no data reuses a file an earlier
+    run wrote for the same slot."""
+    rel_dir = image_dir_name(src)
+    refs = []
+    for n, img in enumerate(images, 1):
+        decoded = decode_data_url(img.get("data"))
+        if decoded:
+            ext, blob = decoded
+            rel = f"{rel_dir}/{epoch_ms}-{n}.{ext}"
+            if write:
+                path = folder / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.is_file() or path.read_bytes() != blob:
+                    path.write_bytes(blob)
+            refs.append(f"[image: {rel}]")
+            continue
+        earlier = sorted((folder / rel_dir).glob(f"{epoch_ms}-{n}.*")) if folder.is_dir() else []
+        refs.append(f"[image: {rel_dir}/{earlier[0].name}]" if earlier else NOT_CAPTURED)
+    return " ".join([text] + refs if text else refs)
+
+
+def keep_earlier_refs(old: str | None, new: str) -> str:
+    """A re-scrape without image data must not erase references an earlier run wrote:
+    when the new text has no captured image refs but the old one does for the same body, keep the old."""
+    if not old or IMAGE_REF_RE.search(new) or not IMAGE_REF_RE.search(old):
+        return new
+    body = lambda t: IMAGE_REF_RE.sub("", t).replace(NOT_CAPTURED, "").strip()  # noqa: E731
+    return old if body(old) == body(new) else new
+
+
 # ---- C4 / C5: render --------------------------------------------------------------------
 
 def render_speakers(chat_name: str, scraped_date: str, messages: dict[int, tuple[str, str]],
@@ -380,7 +452,11 @@ def render_sidecar(group: dict, messages: dict[int, tuple[str, str]], names: dic
     for ms in order:
         spk, text = messages[ms]
         t = _sec_of_day(ms, tz)
-        segs.append({"start": t, "end": t, "speaker": spk, "epoch_ms": ms, "mid": str(ms), "text": text})
+        seg = {"start": t, "end": t, "speaker": spk, "epoch_ms": ms, "mid": str(ms), "text": text}
+        images = IMAGE_REF_RE.findall(text)
+        if images:
+            seg["images"] = images
+        segs.append(seg)
     return {
         "base": src.base,
         "source": {
@@ -425,14 +501,19 @@ def ingest(export: str | os.PathLike, ws: str | os.PathLike, *, tz_flag: str | N
         old_sc = read_sidecar(folder, src) if folder else None
         merged = existing_messages(old_sc)
         known = set(merged)
-        merged.update(g["messages"])
-        new = len(set(merged) - known)
-        names = dict((old_sc or {}).get("names") or {})
-        names.update(g["names"])
         if folder is None:
             name = pick_folder_name(ws, g, tz, reserved)
             reserved.add(name)
             folder = ws / name
+        for ms, (spk, text) in g["messages"].items():
+            imgs = g["images"].get(ms)
+            if imgs:
+                text = attach_images(folder, ms, text, imgs, write=not dry_run, src=src)
+            old = merged.get(ms)
+            merged[ms] = (spk, keep_earlier_refs(old[1] if old else None, text))
+        new = len(set(merged) - known)
+        names = dict((old_sc or {}).get("names") or {})
+        names.update(g["names"])
         speakers = sorted({s for s, _ in merged.values()})
         roles = resolve_roles(speakers, toml_roles, reg_roles, self_name)
         if old_sc:  # keep roles an earlier run recorded for speakers still present
