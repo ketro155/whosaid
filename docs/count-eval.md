@@ -62,8 +62,12 @@ recordings: 2  MAE: 6.50  saturation rate: 100%  suggested_max MAE: 1.00
 
 - `k` is the count the pipeline would use. `error` is `k - true`. MAE is the mean absolute error.
 - `fallback_k` is the duration-filtered recovery count (#38), or `-` when recovery abstained.
+- `fallback_k` is also the substantive voice count when a saturated run applied it
+  (see below).
 - `suggested_max` is the `--max-speakers N` hint (#59) that a saturated, unrecovered
-  run puts in `count_warning`. Its MAE is over the rows that have one.
+  run puts in `count_warning`. Its MAE is over the rows that have one. By default it
+  only appears when the substantive voices alone reach the cap, or with
+  `WHOSAID_COUNT_RECOVERY=legacy`.
 
 Options:
 
@@ -72,3 +76,36 @@ Options:
 - `--use-bounds` replays the `--min-speakers`/`--max-speakers` that each dump
   recorded. By default these are ignored, so the eval measures the auto count.
 - `--labels PATH` reads the labels from somewhere else. `--json` prints machine-readable output.
+
+## Saturated counts: the substantive voice count
+
+When the auto count saturates (the primary cut hits the cap of 20), the plateau
+recovery abstains and you set no `--max-speakers`, the count is already flagged as
+untrustworthy. The estimator now applies the substantive voice count as `k`
+instead of only hinting it. The fallback record has method `substantive-count`
+and an `absorbed_minor` field.
+
+How it counts, on the turns of at least 1 s:
+
+1. Cut at the calibrated 0.58 and keep the clusters that have at least 3 turns.
+2. Treat a kept cluster with under 5% of the kept clusters' total talk as minor
+   (`MINOR_TALK_SHARE`). Fold it into the most similar cluster that has more talk
+   when their centroid cosine is at least 0.60 (`MINOR_ABSORB_GATE`). Repeat until
+   nothing folds.
+
+Why 0.60: on this embedding model a stranger's turns score up to about 0.45
+against a voice (p90), and the same person's turns score at least about 0.72
+(p10). 0.60 sits between the two. On a real 28.6-minute 2-person recording that
+used to come out as 16 speakers, the two minor clusters scored 0.79 and 0.70
+against the first person and under 0.30 against the second. The count is now 2.
+
+A distinct third voice still counts. A voice with 5% or more of the talk is
+never minor, and a minor voice that is far from everyone is not folded. When
+turns are assigned to speakers, a turn under 1 s that is far from every voice
+(cosine under 0.40) keeps a label of its own. Under 1 s of talk such a label is
+left out of the headcount, so a brief guest keeps their words without adding a
+phantom speaker.
+
+To get the old behavior back (`k` left at the bound, `--max-speakers N` only
+hinted), set `WHOSAID_COUNT_RECOVERY=legacy`. The variable is read on every run.
+An explicit `--max-speakers` takes the #75 bounded path either way.

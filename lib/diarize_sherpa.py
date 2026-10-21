@@ -578,6 +578,84 @@ def suggest_max_speakers(R: np.ndarray, merges: list, thresh: float, cap: int,
     return count if count < int(cap) else None
 
 
+# Substantive voice count, APPLIED (not just hinted) when the auto count
+# saturates, the plateau recovery abstains and the caller set no --max-speakers.
+# That is exactly the case where today's output is already flagged untrustworthy:
+# k pinned at the cap of 20, spherical k-means then cuts the meeting into slivers.
+#
+# Measured on a real 28.6-minute 2-person recording (244 embedded turns, 202 of
+# them >= 1 s): the 0.58 cut gave raw_k 73, the brief fold 28, k 20; the ladder on
+# >= 1 s turns gave 38/27/18/13 (no plateau). At the calibrated cut, the clusters
+# with >= SUGGEST_MIN_MEMBERS reliable turns had 109, 39, 7 and 6 members (talk
+# 834 s, 509 s, 12 s, 13 s). The two big ones are the two people (centroid cosine
+# 0.36). The 7- and 6-member clusters score 0.79 and 0.70 against the first person
+# and 0.27 / 0.19 against the second: the same voice in another register, kept
+# out of the brief fold only because each holds one turn >= 2 s. So
+# suggest_max_speakers said 4 for 2 people.
+#
+# The fix absorbs a MINOR cluster (under MINOR_TALK_SHARE of the kept clusters'
+# total talk) into the most similar cluster with MORE talk when their centroid
+# cosine reaches MINOR_ABSORB_GATE. 0.60 sits in the empty band between a
+# stranger's per-turn p90 (~0.45) and the same person's p10 (~0.72) measured for
+# AGGLOM_THRESHOLD, and these are centroids, which separate more cleanly than
+# turns. A distinct third voice survives either way: it is not minor when it
+# holds >= 5% of the talk, and a minor one far from everyone stays a voice.
+# Rollback: WHOSAID_COUNT_RECOVERY=legacy restores the hint-only behavior
+# (suggested_max reported, k left at the bound). Read at call time.
+MINOR_TALK_SHARE = 0.05
+MINOR_ABSORB_GATE = 0.60
+
+
+def count_recovery_mode() -> str:
+    """'legacy' when env WHOSAID_COUNT_RECOVERY=legacy, else 'substantive'.
+
+    Read through a function (not at import time) so tests can flip the env var."""
+    raw = os.environ.get("WHOSAID_COUNT_RECOVERY", "").strip().lower()
+    return "legacy" if raw == "legacy" else "substantive"
+
+
+def substantive_voice_count(R: np.ndarray, Rdur, merges: list, thresh: float, cap: int,
+                            min_speakers: int = 0) -> tuple:
+    """(count, absorbed_minor) of real voices among the substantive turns `R`.
+
+    Cut at `thresh`, keep clusters with >= SUGGEST_MIN_MEMBERS members, then
+    repeatedly absorb the minor cluster with the least talk into the most similar
+    kept cluster with more talk when their centroid cosine >= MINOR_ABSORB_GATE.
+    count is raised to max(2, min_speakers) and is None when it would be >= cap
+    (as in suggest_max_speakers, the substantive voices alone reaching the cap
+    say nothing about a smaller meeting). Deterministic: no randomness."""
+    lab = _cut_merges(len(R), merges, 1.0 - thresh)
+    Rdur = np.asarray(Rdur, dtype=float)
+    sizes = np.bincount(lab)
+    kept = [c for c in range(len(sizes)) if sizes[c] >= SUGGEST_MIN_MEMBERS]
+    sums = {c: R[lab == c].sum(axis=0).astype(np.float64) for c in kept}
+    talk = {c: float(Rdur[lab == c].sum()) for c in kept}
+    total = sum(talk.values())
+    absorbed = 0
+    stuck: set = set()
+    while True:
+        minors = sorted((c for c in sums if c not in stuck and total > 0
+                         and talk[c] < MINOR_TALK_SHARE * total), key=lambda c: (talk[c], c))
+        if not minors:
+            break
+        c = minors[0]
+        larger = [o for o in sums if o != c and talk[o] > talk[c]]
+        v = sums[c] / (np.linalg.norm(sums[c]) + 1e-9)
+        best, best_sim = None, -2.0
+        for o in larger:
+            sim = float(v @ (sums[o] / (np.linalg.norm(sums[o]) + 1e-9)))
+            if sim > best_sim:
+                best, best_sim = o, sim
+        if best is None or best_sim < MINOR_ABSORB_GATE:
+            stuck.add(c)
+            continue
+        sums[best] = sums[best] + sums.pop(c)
+        talk[best] += talk.pop(c)
+        absorbed += 1
+    count = max(len(sums), 2, int(min_speakers or 0))
+    return (count if count < int(cap) else None), absorbed
+
+
 def dump_estimate_inputs(base: str | None, X: np.ndarray, durations, est: dict,
                          suffix: str = "") -> None:
     """Save what estimate_speakers saw to $WHOSAID_DUMP_EMBEDDINGS/<base><suffix>.npz.
@@ -619,8 +697,12 @@ def estimate_speakers(X: np.ndarray, thresh: float = AGGLOM_THRESHOLD,
     to resemble them; a distinct brief voice makes it abstain.
 
     When the result is saturated, recovery abstains and the caller set no
-    `max_speakers`, `suggested_max` carries a `--max-speakers N` hint (#59; see
-    suggest_max_speakers). It is reporting only: `k` and `labels` ignore it.
+    `max_speakers`, the substantive voice count (substantive_voice_count, which
+    also absorbs minor same-voice clusters) is applied as k, recorded as fallback
+    method "substantive-count", and `suggested_max` is None. With env
+    WHOSAID_COUNT_RECOVERY=legacy, or when those voices alone reach the cap, k
+    stays at the bound and `suggested_max` carries a `--max-speakers N` hint (#59;
+    see suggest_max_speakers), reporting only: `k` and `labels` ignore it.
 
     When the caller DID set `max_speakers` (#75), the bound caps the estimate and
     never sets it: if the primary saturates at the bound and the plateau
@@ -702,7 +784,22 @@ def estimate_speakers(X: np.ndarray, thresh: float = AGGLOM_THRESHOLD,
                                     "excluded_short_turns": int(len(X) - len(reliable)),
                                     "bound": int(eff_cap)}
                 else:
-                    suggested = suggest_max_speakers(R, merges, thresh, cap, min_speakers)
+                    n_sub = None
+                    if count_recovery_mode() != "legacy":
+                        # The output is already flagged untrustworthy here, so apply
+                        # the substantive voice count rather than only hinting it
+                        # (see MINOR_ABSORB_GATE). None = the voices alone reach the
+                        # cap: fall through to the hint, which is then None too.
+                        n_sub, absorbed = substantive_voice_count(
+                            R, duration[reliable], merges, thresh, cap, min_speakers)
+                    if n_sub is not None and n_sub < k:
+                        k = n_sub
+                        fallback = {"method": "substantive-count", "k": int(n_sub),
+                                    "reliable_turns": int(len(reliable)),
+                                    "excluded_short_turns": int(len(X) - len(reliable)),
+                                    "absorbed_minor": int(absorbed)}
+                    else:
+                        suggested = suggest_max_speakers(R, merges, thresh, cap, min_speakers)
     if min_speakers and min_speakers > 0:
         k = max(k, min_speakers)
     k = max(1, min(k, len(X)))
@@ -739,7 +836,18 @@ def cluster_estimated(X, estimate, durations):
         labs = spherical_kmeans(R, min(estimate["k"], len(R)))
         centers = np.array([R[labs == c].sum(axis=0) for c in sorted(set(labs))])
         centers /= np.linalg.norm(centers, axis=1, keepdims=True) + 1e-9
-        return np.argmax(X @ centers.T, axis=1)
+        sims = X @ centers.T
+        out = np.argmax(sims, axis=1)
+        if estimate["fallback"].get("method") == "substantive-count":
+            # Guest preservation: a sub-1 s turn far from every substantive voice
+            # gets a label of its own instead of being pinned onto someone else.
+            # Under 1 s of talk it is uncounted (UNCOUNTED_MAX_TALK_SECONDS), so
+            # it keeps its words without inflating the headcount.
+            far = np.flatnonzero((np.asarray(durations) < 1.0)
+                                 & (np.max(sims, axis=1) < BRIEF_VOICE_GATE))
+            for j, i in enumerate(far):
+                out[i] = len(centers) + j
+        return out
     return spherical_kmeans(X, estimate["k"])
 
 
@@ -1781,6 +1889,9 @@ def count_recovery_warning(estimate, before, after, fold_note=None):
         f = estimate["fallback"]
         how = (f"the bound of {f['bound']} was only a cap, and counting substantive voices gave {f['k']} from "
                if f.get("method") == "bounded-substantive-count" else
+               f"the count saturated, so counting substantive voices (folding "
+               f"{f.get('absorbed_minor', 0)} minor same-voice cluster(s)) gave {f['k']} from "
+               if f.get("method") == "substantive-count" else
                f"duration-filtered stable cuts estimated {f['k']} from ")
         parts.append(f"Auto count recovery: primary found {estimate['raw_k']} clusters; "
                      f"{how}"

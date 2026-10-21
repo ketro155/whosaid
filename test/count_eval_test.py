@@ -46,9 +46,14 @@ def segments(X, durations):
     return out
 
 
-def run_harness(*args):
+def run_harness(*args, legacy: bool = False):
+    """Run the harness; `legacy` sets WHOSAID_COUNT_RECOVERY=legacy (the hint-only
+    behavior before the substantive count was applied), else the env is cleared."""
+    env = {k: v for k, v in os.environ.items() if k != "WHOSAID_COUNT_RECOVERY"}
+    if legacy:
+        env["WHOSAID_COUNT_RECOVERY"] = "legacy"
     return subprocess.run([sys.executable, str(HARNESS), *map(str, args)],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=env)
 
 
 def main() -> None:
@@ -100,7 +105,19 @@ def main() -> None:
         labels["not-dumped"] = 3
         (data / "labels.json").write_text(json.dumps(labels))
 
-        run = run_harness(data)
+        # Default: a saturated, unrecovered auto count applies the substantive
+        # voice count (8), so there is no hint and no error.
+        new = run_harness(data)
+        check(new.returncode == 0, f"harness exit {new.returncode}: {new.stderr}")
+        new_row = next(line.split() for line in new.stdout.splitlines()
+                       if line.startswith("eight-saturated"))
+        check(new_row[3] == "8" and new_row[4] == "True" and new_row[5] == "8"
+              and new_row[6] == "-" and new_row[7] == "0", f"eight-saturated row (new): {new_row}")
+        check("recordings: 2  MAE: 0.00  saturation rate: 50%" in new.stdout,
+              f"aggregate line (new): {new.stdout}")
+
+        # WHOSAID_COUNT_RECOVERY=legacy: k stays at the bound and 8 is only hinted.
+        run = run_harness(data, legacy=True)
         check(run.returncode == 0, f"harness exit {run.returncode}: {run.stderr}")
         out = run.stdout
         check(out.splitlines()[0].split() == ["base", "true", "raw_k", "k", "saturated",
@@ -118,12 +135,12 @@ def main() -> None:
         check("labeled but no .npz: not-dumped" in out, "missing labels reported")
         check(".npz without a label (skipped): anchored-residual" in out, "unlabeled reported")
 
-        js = run_harness(data, "--json")
+        js = run_harness(data, "--json", legacy=True)
         result = json.loads(js.stdout)
         check(result["mae"] == 6.0 and result["saturation_rate"] == 0.5, f"json: {result}")
 
         # --threshold is a real second design point: the cut reaches the estimator.
-        lo = json.loads(run_harness(data, "--json", "--threshold", "0.30").stdout)
+        lo = json.loads(run_harness(data, "--json", "--threshold", "0.30", legacy=True).stdout)
         check(all(r["threshold"] == 0.3 for r in lo["rows"]), f"threshold applied: {lo['rows']}")
         check([r["raw_k"] for r in lo["rows"]] != [r["raw_k"] for r in result["rows"]],
               f"a different cut must change some raw_k: {lo['rows']} vs {result['rows']}")
@@ -133,9 +150,11 @@ def main() -> None:
                  threshold=np.float64(d.AGGLOM_THRESHOLD), cap=np.int64(20),
                  min_speakers=np.int64(0), max_speakers=np.int64(8))
         (data / "labels.json").write_text(json.dumps({"bounded": 8}))
-        free = json.loads(run_harness(data, "--json").stdout)["rows"][0]
+        free = json.loads(run_harness(data, "--json", legacy=True).stdout)["rows"][0]
         bound = json.loads(run_harness(data, "--json", "--use-bounds").stdout)["rows"][0]
-        check(free["k"] == 20 and free["suggested_max"] == 8, f"auto run: {free}")
+        check(free["k"] == 20 and free["suggested_max"] == 8, f"auto run (legacy): {free}")
+        free = json.loads(run_harness(data, "--json").stdout)["rows"][0]
+        check(free["k"] == 8 and free["suggested_max"] is None, f"auto run: {free}")
         check(bound["k"] == 8 and bound["suggested_max"] is None, f"bounded run: {bound}")
 
         (data / "labels.json").unlink()

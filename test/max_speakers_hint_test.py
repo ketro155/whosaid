@@ -13,11 +13,17 @@ fold's gate (BRIEF_VOICE_GATE 0.40), so the fold keeps them as distinct and the
 count still saturates. At the #38 recipe's 0.55 the fold explains them and there
 is nothing left to hint about (test_brief_fold_resolves_saturation).
 
+The hint is the LEGACY behavior: by default a saturated, unrecovered auto count
+now applies the substantive voice count instead (test/oversplit_fold_test.py),
+so the hint assertions run under WHOSAID_COUNT_RECOVERY=legacy.
+
 Run:
     uv run --with numpy python test/max_speakers_hint_test.py
 """
 
+import contextlib
 import copy
+import os
 import sys
 from pathlib import Path
 
@@ -37,6 +43,20 @@ def check(cond: bool, msg: str) -> None:
     global CHECKS
     assert cond, msg
     CHECKS += 1
+
+
+@contextlib.contextmanager
+def legacy_recovery():
+    """WHOSAID_COUNT_RECOVERY=legacy for the block, restoring the previous value."""
+    saved = os.environ.get("WHOSAID_COUNT_RECOVERY")
+    os.environ["WHOSAID_COUNT_RECOVERY"] = "legacy"
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("WHOSAID_COUNT_RECOVERY", None)
+        else:
+            os.environ["WHOSAID_COUNT_RECOVERY"] = saved
 
 
 def unit(v):
@@ -65,6 +85,16 @@ def saturating_fixture(voices: int = TRUE_VOICES, guest: bool = True, cohesion: 
 
 
 def test_saturated_abstain_suggests():
+    with legacy_recovery():
+        _saturated_abstain_suggests()
+    # Default mode applies the same substantive count instead of hinting it.
+    X, dur = saturating_fixture()
+    est = d.estimate_speakers(X, durations=dur)
+    check(est["fallback"]["method"] == "substantive-count" and est["k"] == TRUE_VOICES
+          and est["suggested_max"] is None, f"default mode applies the count: {est}")
+
+
+def _saturated_abstain_suggests():
     X, dur = saturating_fixture()
     est = d.estimate_speakers(X, durations=dur)
     check(est["saturated"] is True, f"fixture must saturate the cap: raw_k {est['raw_k']}")
@@ -130,6 +160,11 @@ def test_not_saturated_gives_no_suggestion():
 
 
 def test_hint_reaches_cluster_segments_and_legacy_estimates():
+    with legacy_recovery():
+        _hint_reaches_cluster_segments_and_legacy_estimates()
+
+
+def _hint_reaches_cluster_segments_and_legacy_estimates():
     X, dur = saturating_fixture()
     segs = []
     t = 0.0
