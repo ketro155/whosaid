@@ -25,7 +25,7 @@ const POSTS = [
     [NOW - 2 * H, 'Alice', 'visible r5'],
   ] },
   // An old root (outside the 7-day cutoff, inside the grace) with a fresh reply.
-  { root: [NOW - 10 * D, 'Eve', 'old root'], replies: [[NOW - 1 * D, 'Frank', 'fresh reply']] },
+  { root: [NOW - 10 * D, 'Eve', 'old root'], replies: [[NOW - 1 * D, 'Dave', 'fresh reply']] },
   // Every visible message is old, so the hidden replies are older still: no expand.
   { root: [NOW - 20 * D, 'Gina', 'stale thread'], button: true, replies: [[NOW - 19 * D, 'Hal', 'old reply']] },
   // Older than cutoff + grace: the back-scroll stops here.
@@ -135,7 +135,7 @@ async function runScraper(initiallyPressed, globals = {}) {
   assert.ok(ch.reachedCutoff, 'stops at the root older than cutoff + grace');
   const got = ch.messages.map((m) => m.author + ': ' + m.text.replace(/^\(reply to [^)]*\) /, ''));
   assert.strictEqual(JSON.stringify(got), JSON.stringify([   // chronological
-    'Frank: fresh reply', 'Alice: root one', 'Bob: hidden r1', 'Bob: hidden r2, still Bob', 'Carol: visible r3',
+    'Dave: fresh reply', 'Alice: root one', 'Bob: hidden r1', 'Bob: hidden r2, still Bob', 'Carol: visible r3',
     'Carol: visible r4, still Carol', 'Alice: visible r5',
   ]), 'hidden replies fetched, authors carried forward, old messages dropped; got ' + JSON.stringify(got));
   console.log('ok A: hidden replies expanded, authors carried, cutoff applied');
@@ -144,9 +144,9 @@ async function runScraper(initiallyPressed, globals = {}) {
   assert.strictEqual(ch.expanded, 1);
   console.log('ok B: a thread whose visible messages are all old is not expanded');
 
-  const frank = ch.messages.find((m) => m.author === 'Frank');
-  assert.ok(frank.is_reply && frank.reply_to === 'Eve' && frank.thread_root_epoch === POSTS[1].root[0]);
-  assert.ok(frank.text.startsWith('(reply to Eve, post of '), 'reply prefix names the root author');
+  const dave = ch.messages.find((m) => m.author === 'Dave');
+  assert.ok(dave.is_reply && dave.reply_to === 'Eve' && dave.thread_root_epoch === POSTS[1].root[0]);
+  assert.ok(dave.text.startsWith('(reply to Eve, post of '), 'reply prefix names the root author');
   assert.ok(!ch.messages.find((m) => m.text === 'root one').is_reply, 'roots are not replies');
   console.log('ok C: reply metadata and prefix on a fresh reply to an old root');
 

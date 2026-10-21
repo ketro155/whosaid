@@ -315,7 +315,7 @@
 
 /*
  * DRIVER: as for teams-chat-scraper.js, with window.__tsc in place of window.__ts.
- *   1. optional: window.__TS_CUTOFF_DAYS = 7; window.__TS_CHANNELS = ['AI-Driven'];
+ *   1. optional: window.__TS_CUTOFF_DAYS = 7; window.__TS_CHANNELS = ['Project'];
  *   2. evaluate this file in the Teams tab, then poll JSON.stringify(window.__tsc.progress)
  *      and window.__tsc.done with short calls;
  *   3. JSON.stringify(window.__tsc.result) -> raw.json, then
