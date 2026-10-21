@@ -114,7 +114,7 @@ lists the meetings and records the pool root.
   **short-turn acc** counts only turns under 1.5 s.
 - **named right / named wrong** (refs modes): the share of speech time where whosaid printed
   a name and the name was right, or wrong. A wrong name is worse than no name at all.
-- **WER**: word error rate of the transcript against the script.
+- **WER**: word error rate of the transcript against the script. Realistic meetings report no WER (`wer` is null): their turns voice fragments of rendered lines but carry the whole line's text, so there is no exact reference.
 
 Aggregates are micro-averaged: by speech time for DER and names, and by turn count for turn
 accuracy.

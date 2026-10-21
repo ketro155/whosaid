@@ -18,6 +18,13 @@ All notable changes to whosaid are documented here. This project adheres to
   runs as `uvx --from whosaid==<version> whosaid-mcp`. Bump `server.json`'s two versions with each
   release, then `mcp-publisher publish`.
 
+### Fixed
+
+- **Realistic eval meetings no longer report a bogus ~72% WER.** Their turns voice fragments of
+  rendered lines but were labelled with the whole line's text, so every ASR model scored the
+  same wrong number. `truth.json` now carries `"text_exact": false`, and `score.py` reports no
+  WER for it (or for older truth tagged `realistic`).
+
 ## [1.14.0] - 2026-10-16
 
 ### Added

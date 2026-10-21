@@ -280,7 +280,13 @@ def score_meeting(truth, hyp_segments, mode, enrolled=None, hyp_text=None, uncou
                 wrong.append(h)
 
     wer = None
-    if hyp_text is not None:
+    # Realistic meetings voice fragments of rendered lines but label each turn
+    # with the whole line's text, so there is no exact reference: no WER.
+    # Truth built before the "text_exact" flag existed is detected by its tag.
+    exact = truth.get("text_exact")
+    if exact is None:
+        exact = "realistic" not in (truth.get("tags") or [])
+    if hyp_text is not None and exact:
         wer = word_error_rate(" ".join(t.get("text", "") for t in turns), hyp_text)
 
     named = mode == "named"

@@ -326,6 +326,8 @@ def render_meeting(plan, voices, bank, pool_root, out_dir, clips=None, switch_p=
                       "line_id": first.get("line_id", texts.get(first.get("clip"), ("", ""))[1]),
                       "kind": t.get("kind", "turn")})
     truth = {"schema": 1, "id": mid, "seed": plan["seed"], "tags": plan["tags"],
+             # turns voice fragments but carry whole-line text: not a WER reference
+             "text_exact": False,
              "duration": round(len(audio) / SR, 3),
              "speakers": [{"name": sp["name"], "voice": sp["voice"],
                            "enrolled_clip": enroll_paths[sp["voice"]], "gain_db": 0.0,

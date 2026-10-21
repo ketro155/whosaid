@@ -194,6 +194,39 @@ class Blind(unittest.TestCase):
         self.assertEqual(r["wer"], 0.5)
 
 
+class WerExactness(unittest.TestCase):
+    HYP = H(("X", 0, 5))
+    TXT = "the quick brown dog jumped"
+
+    def truth(self, **extra):
+        t = T(("Alice", 0, 5, "the quick brown fox jumped"))
+        t.update(extra)
+        return t
+
+    def test_build_style_truth_keeps_wer(self):
+        r = sc.score_meeting(self.truth(tags=["n2"]), self.HYP, "blind", hyp_text=self.TXT)
+        self.assertEqual(r["wer"], 0.2)
+
+    def test_realistic_tag_gets_no_wer(self):
+        r = sc.score_meeting(self.truth(tags=["realistic", "n2"]), self.HYP, "blind", hyp_text=self.TXT)
+        self.assertIsNone(r["wer"])
+
+    def test_text_exact_false_gets_no_wer(self):
+        r = sc.score_meeting(self.truth(text_exact=False), self.HYP, "blind", hyp_text=self.TXT)
+        self.assertIsNone(r["wer"])
+
+    def test_text_exact_true_overrides_tag(self):
+        r = sc.score_meeting(self.truth(tags=["realistic"], text_exact=True), self.HYP, "blind",
+                             hyp_text=self.TXT)
+        self.assertEqual(r["wer"], 0.2)
+
+    def test_aggregate_wer_none_when_all_none(self):
+        t = self.truth(tags=["realistic"])
+        a = sc.score_meeting(t, self.HYP, "blind", hyp_text=self.TXT)
+        b = sc.score_meeting(t, self.HYP, "blind", hyp_text=self.TXT)
+        self.assertIsNone(sc.aggregate([a, b])["wer"])
+
+
 class Named(unittest.TestCase):
     TRUTH = T(("Alice", 0, 10), ("Bob", 10, 20))
 
