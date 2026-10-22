@@ -322,7 +322,7 @@ def _diarization_reason(proc) -> str:
 def whosaid_transcribe(
     audio: str,
     outdir: Optional[str] = None,
-    accuracy: Literal["fast", "accurate"] = "fast",
+    accuracy: Literal["default", "fast", "accurate"] = "default",
     format: Literal["txt", "srt", "vtt", "tsv", "json", "all"] = "all",
     lang: str = "en",
     speakers: Optional[int] = None,
@@ -358,8 +358,12 @@ def whosaid_transcribe(
     out = outdir or (os.path.dirname(audio) or ".")
 
     args = [audio, "--outdir", out, "--format", effective_format, "--lang", lang]
-    # whosaid defaults to large-v3, so "fast" must ask for turbo explicitly.
-    args.append("--accurate" if accuracy == "accurate" else "--fast")
+    # "default" passes nothing, so the CLI default (large-v3, or WHOSAID_MODEL) applies;
+    # "fast" must ask for turbo explicitly now that the default is large-v3.
+    if accuracy == "accurate":
+        args.append("--accurate")
+    elif accuracy == "fast":
+        args.append("--fast")
     if speakers is not None and speakers >= 1:
         args += ["--speakers", str(speakers)]
     else:
@@ -1920,7 +1924,8 @@ Nothing — audio, text, or voice embeddings — ever leaves the machine.
 - `audio` → one input file. Output base = the basename with any char outside
   `[A-Za-z0-9_-]` mapped to `_` (so `v1.2` → `v1_2`).
 - `outdir` → `-o/--outdir DIR` (default: alongside the input).
-- `accuracy` → `"fast"` passes `--fast` = **turbo**
+- `accuracy` → `"default"` (the default) passes nothing, so the CLI default model
+  applies: full **large-v3**, or whatever `WHOSAID_MODEL` names. `"fast"` passes `--fast` = **turbo**
   (`mlx-community/whisper-large-v3-turbo`, ~1.5 GB, about half the time, less
   stable on hard audio); `"accurate"` passes `--accurate` = full **large-v3**
   (`mlx-community/whisper-large-v3-mlx`, the whosaid CLI default, best fidelity on

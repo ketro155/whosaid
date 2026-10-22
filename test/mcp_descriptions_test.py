@@ -139,7 +139,7 @@ def main() -> None:
         f"transcribe format enum mismatch: {tprops['format'].get('enum')}",
     )
     check(
-        set(tprops["accuracy"]["enum"]) == {"fast", "accurate"},
+        set(tprops["accuracy"]["enum"]) == {"default", "fast", "accurate"},
         f"transcribe accuracy enum mismatch: {tprops['accuracy'].get('enum')}",
     )
     check(
