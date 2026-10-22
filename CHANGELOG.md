@@ -6,6 +6,8 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-21
+
 ### Added
 
 - **Teams chat images.** The Teams chat scraper now copies inline pasted images (through a
@@ -14,11 +16,37 @@ All notable changes to whosaid are documented here. This project adheres to
   `teams.speakers.txt` and an `images` list on the sidecar segment. Image-only messages are
   kept. `window.__TS_IMAGES = false` keeps the old text-only scrape.
 
+- **`whosaid ab`: compare two settings on your own recording.** Runs the same audio twice
+  (`--a "<flags>" --b "<flags>"`, plus `--env-a`/`--env-b K=V`) and writes `ab-report.md` with
+  each arm's speaker count, talk shares, word agreement, the largest disagreement spans and
+  name agreement. `--same-asr` reuses A's transcript for a diarization-only A/B. Each arm works on a copy
+  of the voice registry, so a trial never enrolls anything. `whosaid ab --compare DIR_A DIR_B`
+  diffs two finished runs. See `docs/ab-compare.md`.
+
+- **`--fast`** transcribes with whisper large-v3-turbo (the old default).
+
 - **Listed in the MCP registry** as `io.github.sblattj/whosaid` (`server.json`): the PyPI package
   runs as `uvx --from whosaid==<version> whosaid-mcp`. Bump `server.json`'s two versions with each
   release, then `mcp-publisher publish`.
 
+### Changed
+
+- **Transcription defaults to whisper large-v3** (`mlx-community/whisper-large-v3-mlx`). On the
+  hard eval set turbo scored 2.4 to 4.2% WER and swung run to run (one meeting 2.6% to 17.2%);
+  large-v3 held 1.4%. It is slower and the download is about 3 GB. Roll back per run with
+  `--fast`, or everywhere with `WHOSAID_MODEL=mlx-community/whisper-large-v3-turbo`.
+  `--accurate` still works and now equals the default. The MCP `accuracy` argument gains
+  `"default"` (follows the CLI default) and `"fast"`.
+
 ### Fixed
+
+- **A two-person recording no longer splits into 8 to 18 speakers**
+  ([#104](https://github.com/sblattj/whosaid/issues/104)). When the auto count saturated at its
+  cap, the plateau ladder never settled and diarization ran with k=20. It now applies a
+  substantive voice count: clusters with real talk time stay, and minor clusters (under 5% of
+  talk) that sound like a larger one fold into it. Stray short turns get uncounted guest labels.
+  On the realistic eval meetings DER drops from 27.4% to 18.4%; meetings that never saturate
+  are unchanged. Roll back with `WHOSAID_COUNT_RECOVERY=legacy`.
 
 - **Realistic eval meetings no longer report a bogus ~72% WER.** Their turns voice fragments of
   rendered lines but were labelled with the whole line's text, so every ASR model scored the
