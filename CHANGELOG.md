@@ -6,6 +6,8 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-10-23
+
 ### Fixed
 
 - **`whosaid record --help` (and `-h`) prints help.** It used to fall through and start a
