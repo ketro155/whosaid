@@ -17,7 +17,11 @@
 // along and its frames are discarded. Ctrl-C / SIGTERM stops capture and
 // closes the files (AVAudioFile finalizes the WAV header on close); exit 0.
 // If macOS kills the stream mid-capture the files are closed the same way and
-// the exit is 3 (5 if the Screen Recording grant was revoked).
+// the exit is 3 (5 if the Screen Recording grant was revoked). A second signal
+// exits at once (130), and so does any signal before capture starts. If
+// ScreenCaptureKit does not answer within 20 s at startup
+// ($WHOSAID_RECORD_APP_STARTUP_TIMEOUT), the exit is 1: a hung helper would
+// otherwise hold its connection and break every later capture from this binary.
 
 import AVFoundation
 import CoreMedia
@@ -30,6 +34,27 @@ func log(_ s: String) {
     FileHandle.standardError.write(("record-app: " + s + "\n").data(using: .utf8)!)
 }
 
+/// Every exit goes through here. exit() runs atexit handlers, and with a
+/// ScreenCaptureKit connection open those can block forever; a helper stuck
+/// that way keeps its connection, and macOS then interrupts every new capture
+/// started from the same binary. The WAV files are closed before this runs.
+func terminate(_ code: Int32) -> Never {
+    fflush(stdout)
+    _exit(code)
+}
+
+/// Kills the process if ScreenCaptureKit has not answered by the deadline, so
+/// a hung call can never leave an orphan behind (see terminate).
+func watchdog(_ seconds: Double, _ what: String) -> DispatchWorkItem {
+    let item = DispatchWorkItem {
+        log("\(what) got no answer from ScreenCaptureKit within \(Int(seconds))s; giving up.")
+        log("If this repeats, a stuck helper may hold the capture: pgrep -fl record-app, then kill it.")
+        terminate(1)
+    }
+    DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: item)
+    return item
+}
+
 func isPermissionError(_ error: Error) -> Bool {
     let ns = error as NSError
     if ns.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && ns.code == -3801 { return true }
@@ -40,7 +65,7 @@ func isPermissionError(_ error: Error) -> Bool {
 
 func permissionExit() -> Never {
     permissionHelp()
-    exit(5)
+    terminate(5)
 }
 
 func permissionHelp() {
@@ -55,7 +80,7 @@ func shareableContent() async -> SCShareableContent {
     } catch {
         if isPermissionError(error) { permissionExit() }
         log("ScreenCaptureKit failed: \(error.localizedDescription)")
-        exit(1)
+        terminate(1)
     }
 }
 
@@ -291,9 +316,11 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Stop capture, pad both legs to the same length, close the files.
+    /// Runs once; later calls (a second Ctrl-C, the --max-seconds check, a
+    /// late stream callback) return without logging or exiting again.
     func finish(code: Int32) {
-        queue.sync {
-            if finished { return }
+        let first = queue.sync { () -> Bool in
+            if finished { return false }
             finished = true
             if let mic {
                 let n = max(app.written, mic.written)
@@ -303,14 +330,19 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             // close() writes the final WAV header; exit() would skip deinit.
             app.file.close()
             mic?.file.close()
+            return true
         }
+        guard first else { return }
         let s = stream
+        // stopCapture on a stream macOS already killed can wait forever; the
+        // files are closed, so cap the wait instead of leaving an orphan.
+        _ = watchdog(3, "stopping the capture")
         Task {
             try? await s?.stopCapture()
             let secs = Double(self.app.written) / sampleRate
             log(String(format: "stopped after %.1fs (app buffers: %d%@, restarts: %d)", secs, self.app.buffers,
                        self.mic.map { ", mic buffers: \($0.buffers)" } ?? "", self.restarts))
-            exit(code)
+            terminate(code)
         }
     }
 
@@ -348,7 +380,7 @@ var maxSeconds = 10_800.0
 
 func usage() -> Never {
     log("usage: record-app --list | --app <bundle-id|name> --out-dir DIR [--no-mic] [--max-seconds N]")
-    exit(2)
+    terminate(2)
 }
 
 func nextValue() -> String {
@@ -370,27 +402,43 @@ while !args.isEmpty {
     }
 }
 
-// Ignore default SIGINT/SIGTERM handling; dispatch sources below finish cleanly.
+// Ignore default SIGINT/SIGTERM handling; these dispatch sources take over.
+// Before capture starts there is nothing to save, so a signal exits at once.
+// During capture the first one finishes cleanly; a second one exits hard, so
+// Ctrl-C twice (or timeout/pkill) always ends the process.
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
 var signalSources: [DispatchSourceSignal] = []
 var recorder: Recorder?
+var signalled = false
+for sig in [SIGINT, SIGTERM] {
+    let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+    src.setEventHandler {
+        guard let rec = recorder, !signalled else { terminate(130) }
+        signalled = true
+        rec.finish(code: 0)
+    }
+    src.resume()
+    signalSources.append(src)
+}
 
 Task {
+    let limit = Double(ProcessInfo.processInfo.environment["WHOSAID_RECORD_APP_STARTUP_TIMEOUT"] ?? "") ?? 20
+    let startup = watchdog(limit, list ? "listing apps" : "starting the capture")
     let content = await shareableContent()
     let apps = uniqueApps(content)
     if list {
         for a in apps { print("\(a.bundleIdentifier)\t\(a.applicationName)") }
-        exit(0)
+        terminate(0)
     }
     guard let query = appQuery, let dir = outDir else { usage() }
     guard let target = resolveApp(query, in: apps) else {
         log("no running app matches '\(query)'. Running apps: whosaid record --list-apps")
-        exit(2)
+        terminate(2)
     }
     guard let display = content.displays.first else {
         log("no display available to attach the capture stream to.")
-        exit(1)
+        terminate(1)
     }
     let base = URL(fileURLWithPath: dir)
     let rec: Recorder
@@ -399,28 +447,25 @@ Task {
                        mic: withMic ? try Leg(name: "mic", url: base.appendingPathComponent("mic.wav")) : nil)
     } catch {
         log("cannot open output in \(dir): \(error.localizedDescription)")
-        exit(1)
+        terminate(1)
     }
     recorder = rec
-    for sig in [SIGINT, SIGTERM] {
-        let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-        src.setEventHandler { rec.finish(code: 0) }
-        src.resume()
-        signalSources.append(src)
-    }
     do {
         try await rec.start(target: target, display: display)
     } catch {
         if isPermissionError(error) { permissionExit() }
         log("could not start capture: \(error.localizedDescription)")
-        exit(1)
+        terminate(1)
     }
+    startup.cancel()
     log("capturing \(target.applicationName) (\(target.bundleIdentifier))\(withMic ? " + mic" : "") — Ctrl-C to stop.")
 
     // Progress: one line every 10 s so a dead leg is visible while it runs.
     let started = Date()
     while true {
-        try? await Task.sleep(nanoseconds: 10_000_000_000)
+        // Wake at --max-seconds too, not only on the 10 s progress tick.
+        let left = maxSeconds - Date().timeIntervalSince(started)
+        try? await Task.sleep(nanoseconds: UInt64(max(0.05, min(10, left)) * 1_000_000_000))
         let elapsed = Date().timeIntervalSince(started)
         var line = String(format: "%5.0fs  app peak %@ (%@)", elapsed, rec.queue.sync { rec.app.takePeakDB() },
                           rec.queue.sync { rec.app.driftSummary() })

@@ -60,6 +60,18 @@ assert_contains "$OUT" "whosaid record --app A" "help lists record --app"
 assert_contains "$OUT" "--list-apps" "help lists --list-apps"
 assert_contains "$OUT" "left = mic (you), right = the app (them)" "help documents the channel layout"
 
+echo "-- record --help prints help instead of recording --"
+for flag in --help -h; do
+  # alarm: before the fix, --help started a mic recording that ran up to 3h.
+  OUT="$(cd "$TMP" && perl -e 'alarm 30; exec @ARGV' "$WHOSAID" record $flag 2>&1)" && RC=0 || RC=$?
+  assert_eq "$RC" 0 "'record $flag' exits 0"
+  assert_contains "$OUT" "whosaid record --app A" "'record $flag' prints the help"
+  case "$OUT" in *"whosaid: recording"*) fail "'record $flag' started a recording" ;; esac
+  PASS=$((PASS + 1))
+done
+[ -z "$(ls "$TMP" 2>/dev/null)" ] || fail "record --help left files behind: $(ls "$TMP")"
+PASS=$((PASS + 1))
+
 echo "-- flag errors exit 2 before recording --"
 run_w record --no-mic
 assert_eq "$RC" 2 "'record --no-mic' without --app exits 2"

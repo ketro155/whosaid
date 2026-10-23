@@ -6,6 +6,22 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **`whosaid record --help` (and `-h`) prints help.** It used to fall through and start a
+  mic recording.
+- **The `record --app` helper can no longer outlive its run.** Every exit skips the atexit
+  handlers that can block with a ScreenCaptureKit connection open, startup gives up after
+  20 s with no answer (`$WHOSAID_RECORD_APP_STARTUP_TIMEOUT`), stopping a dead stream waits
+  at most 3 s, a signal before capture starts exits at once, and a second Ctrl-C/SIGTERM
+  exits hard. A stuck helper (seen once as a `--list` that never exited) held its
+  connection, and macOS then cut off every later capture from the same binary at 0.0 s
+  with "application connection being interrupted".
+- **Stopping runs once.** A second stop request no longer logs "stopped after ..." again or
+  races another exit.
+- **`--max-seconds` is exact.** The helper used to notice the limit only on its 10 s
+  progress tick.
+
 ## [1.15.0] - 2026-10-21
 
 ### Added

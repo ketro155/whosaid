@@ -1404,6 +1404,7 @@ cmd_record() {
         [[ $# -ge 2 && -n "$2" ]] || { log "--app needs an app (bundle ID or name); see: whosaid record --list-apps"; exit 2; }
         app="$2"; shift 2 ;;
       --no-mic) no_mic=1; shift ;;
+      -h|--help) cmd_help; exit 0 ;;
       --list-apps)
         local bin
         bin="$(ensure_record_app_helper)" || exit 1
