@@ -45,11 +45,13 @@ func terminate(_ code: Int32) -> Never {
 
 /// Kills the process if ScreenCaptureKit has not answered by the deadline, so
 /// a hung call can never leave an orphan behind (see terminate).
-func watchdog(_ seconds: Double, _ what: String) -> DispatchWorkItem {
+func watchdog(_ seconds: Double, _ what: String, code: Int32 = 1) -> DispatchWorkItem {
     let item = DispatchWorkItem {
         log("\(what) got no answer from ScreenCaptureKit within \(Int(seconds))s; giving up.")
-        log("If this repeats, a stuck helper may hold the capture: pgrep -fl record-app, then kill it.")
-        terminate(1)
+        if code != 0 {
+            log("If this repeats, a stuck helper may hold the capture: pgrep -fl record-app, then kill it.")
+        }
+        terminate(code)
     }
     DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: item)
     return item
@@ -335,8 +337,9 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         guard first else { return }
         let s = stream
         // stopCapture on a stream macOS already killed can wait forever; the
-        // files are closed, so cap the wait instead of leaving an orphan.
-        _ = watchdog(3, "stopping the capture")
+        // files are closed, so cap the wait instead of leaving an orphan, and
+        // keep the exit code: the recording itself is intact.
+        _ = watchdog(3, "stopping the capture", code: code)
         Task {
             try? await s?.stopCapture()
             let secs = Double(self.app.written) / sampleRate
@@ -484,6 +487,7 @@ Task {
         if elapsed >= maxSeconds {
             log("reached --max-seconds \(Int(maxSeconds)); stopping.")
             rec.finish(code: 0)
+            return  // finish() exits the process; don't spin on 0.05 s ticks until it does
         }
     }
 }
