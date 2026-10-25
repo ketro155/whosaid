@@ -6,6 +6,8 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [1.15.2] - 2026-10-24
+
 ### Fixed
 
 - **`roll-up` refolds only the commitment folders that changed (#98).** A Teams delta that
