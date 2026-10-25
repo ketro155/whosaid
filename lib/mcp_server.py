@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -200,7 +201,7 @@ Typical workflow: whosaid_transcribe -> read the speaker cards in the result -> 
 
 Speakers can carry role tags (self/boss/peer/report/external) set via whosaid_relabel's `roles` param; roles appear in speaker cards and transcripts and tell you whose commitments matter most (boss ranks higher). "self" is the user's own voice.
 
-Dev-commitments = the cross-meeting corpus of commitments the self-roled speaker made to others/team. Extracted per-meeting into commitments.md/commitments.json (via `python3 lib/workspace.py commitments --transcript T --json-out F`, or `whosaid ingest --commitments`), then rolled up into _COMMITMENTS.md/_commitments.json with stable CM-NNN ids. whosaid_worklist(owner="me") answers "what did I sign up for, ranked": the owner's commitments plus the action items they own, tiered P1/P2/P3 (boss-requested, blocking or deadline cues, repeat across meetings, recency, cue strength) with a score and why strings; the same view the roll-up writes to _WORKLIST-<Owner>.md (the tool takes tier/limit/offset/compact and caps at 50 items unless told otherwise).
+Dev-commitments = the cross-meeting corpus of commitments the self-roled speaker made to others/team. Extracted per-meeting into commitments.md/commitments.json (via `python3 lib/workspace.py commitments --transcript T --json-out F`, or `whosaid ingest --commitments`), then rolled up into _COMMITMENTS.md/_commitments.json with stable CM-NNN ids. whosaid_worklist(owner="me") answers "what did I sign up for, ranked": the owner's commitments plus the action items they own, tiered P1/P2/P3 (boss-requested, blocking or deadline cues, repeat across meetings, recency, cue strength) with a score and why strings; the same view the roll-up writes to _WORKLIST-<Owner>.md (the tool takes tier/limit/offset/compact and caps at 50 items unless told otherwise). If it times out, do not retry the same call: read the error's category/phase/hint, and use the attached `cached` result or call again with use_cache=true (it reports stale and generated_at).
 
 Not exposed here: `enroll` and `record` are interactive microphone operations that need a live terminal. Run them from the `whosaid` CLI. The first transcribe downloads ~1.5 GB of models; run whosaid_doctor to check readiness. Full flag/env/long-audio reference: read the whosaid://guide resource.
 
@@ -1145,8 +1146,31 @@ def _read_only() -> ToolAnnotations:
     )
 
 
-def _ws_error(error: str, hint: str) -> dict:
-    return {"ok": False, "error": error, "hint": hint}
+def _ws_error(error: str, hint: str, **fields) -> dict:
+    """{"ok": False, "error", "hint"} plus any keyword fields given (GitHub
+    issue #113 adds category, elapsed_s, phase); none given = the old shape."""
+    out = {"ok": False, "error": error, "hint": hint}
+    out.update(fields)
+    return out
+
+
+# _run_ws error categories (GitHub issue #113): missing_script, spawn_failed,
+# timeout (with elapsed_s and phase), exit_<code>, bad_json. whosaid_worklist
+# adds missing_corpora and no_cache.
+_PHASE_RE = re.compile(r"\bphase:\s*(.+?)\s*$")
+
+
+def _last_phase(stderr) -> Optional[str]:
+    """The last 'phase: <name>' line a (possibly killed) CLI wrote to stderr,
+    or None. TimeoutExpired carries partial stderr as bytes, str or None."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    phase = None
+    for line in (stderr or "").splitlines():
+        m = _PHASE_RE.search(line)
+        if m:
+            phase = m.group(1)
+    return phase
 
 
 def _resolve_ws(workspace: Optional[str]) -> tuple:
@@ -1183,15 +1207,20 @@ def _run_ws(script: Path, args: list, ws: Path) -> tuple:
     script, a non-zero exit, a timeout, or unparsable stdout all come back as
     {"ok": False, "error": <last stderr line>, "hint": ...}, where the hint is
     `run: whosaid index <ws>` (the CLIs' own hint when the index is missing)
-    or, for exit 2, an argument problem.
+    or, for exit 2, an argument problem. Every error also carries a "category"
+    (missing_script, spawn_failed, timeout, exit_<code>, bad_json); a timeout
+    adds "elapsed_s" and "phase", the last 'phase: <name>' stderr line the
+    killed CLI wrote (None when it wrote none).
     """
     index_hint = f"run: whosaid index {ws}"
     if not script.is_file():
         return None, _ws_error(
             f"{script.name} is missing from {LIB_DIR}",
             "this whosaid checkout lacks the workspace search stack; reinstall or update it",
+            category="missing_script",
         )
     cmd = [sys.executable, str(script), *[str(a) for a in args], "--json"]
+    started = time.perf_counter()
     try:
         proc = subprocess.run(
             cmd,
@@ -1200,14 +1229,18 @@ def _run_ws(script: Path, args: list, ws: Path) -> tuple:
             text=True,
             timeout=WS_TIMEOUT,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return None, _ws_error(
-            f"{script.name} {args[0] if args else ''} timed out after {WS_TIMEOUT:.0f}s".replace("  ", " "),
+            f"{script.name} {args[0] if args else ''} timed out after {WS_TIMEOUT:g}s".replace("  ", " "),
             "retry with a narrower query, or check that the local Ollama is reachable "
             "if meaning search is enabled",
+            category="timeout",
+            elapsed_s=round(time.perf_counter() - started, 2),
+            phase=_last_phase(exc.stderr),
         )
     except OSError as exc:
-        return None, _ws_error(f"could not start {script.name}: {exc}", "run whosaid_doctor")
+        return None, _ws_error(f"could not start {script.name}: {exc}", "run whosaid_doctor",
+                               category="spawn_failed")
     if proc.returncode != 0:
         lines = [ln.strip() for ln in (proc.stderr or "").splitlines() if ln.strip()]
         last = lines[-1] if lines else (proc.stdout or "").strip()[-500:]
@@ -1217,11 +1250,13 @@ def _run_ws(script: Path, args: list, ws: Path) -> tuple:
             hint = index_hint
         else:  # the index exists and the CLI did not ask for a rebuild: an argument problem
             hint = f"the index exists; check the arguments (rebuild if stale with: whosaid index {ws})"
-        return None, _ws_error(last or f"{script.name} exited {proc.returncode}", hint)
+        return None, _ws_error(last or f"{script.name} exited {proc.returncode}", hint,
+                               category=f"exit_{proc.returncode}")
     try:
         return json.loads(proc.stdout or "null"), None
     except json.JSONDecodeError as exc:
-        return None, _ws_error(f"{script.name} returned unparsable JSON: {exc}", index_hint)
+        return None, _ws_error(f"{script.name} returned unparsable JSON: {exc}", index_hint,
+                               category="bad_json")
 
 
 def _as_list(payload, key: str) -> list:
@@ -1315,7 +1350,14 @@ _DESC_WS_WORKLIST = (
     "compact=true keeps only id, source, text, tier, score and why per item; a call with "
     "neither limit nor offset returns the top 50 items plus total/omitted and a paging "
     "hint (GitHub issue #30). Deterministic, no LLM, "
-    "same view as _WORKLIST-<Owner>.md. Read-only. Keywords: my worklist, what did I "
+    "same view as _WORKLIST-<Owner>.md. Errors carry a category (GitHub issue #113): "
+    "missing_corpora (neither corpus exists; the only case that says to run the roll-up), "
+    "timeout (with elapsed_s, the phase it was in and a hint for that phase, plus the "
+    "cached result as `cached` with generated_at and stale when one exists), exit_<code>, "
+    "bad_json, no_cache. use_cache=true returns the cached worklist the roll-up writes to "
+    "_WORKLIST-<Owner>.json (source=cache, generated_at, stale = the corpora changed since) "
+    "without running the ranking; use it after a timeout instead of retrying the same "
+    "call. Read-only. Keywords: my worklist, what did I "
     "promise, what did I sign up for, my priorities, ranked commitments."
 )
 _DESC_WS_STATUS = (
@@ -1687,57 +1729,18 @@ def whosaid_workspace_status(workspace: Optional[str] = None) -> dict:
 # ---------------------------------------------------------------------------
 # 16) whosaid_worklist
 # ---------------------------------------------------------------------------
-@mcp.tool(name="whosaid_worklist", description=_DESC_WS_WORKLIST, annotations=_read_only())
-def whosaid_worklist(
-    owner: str = "me",
-    tier: Optional[str] = None,
-    limit: Optional[int] = None,
-    offset: int = 0,
-    compact: bool = False,
-    workspace: Optional[str] = None,
-) -> dict:
-    """Shell `workspace.py worklist <ws> --owner <owner> --json`.
+_WORKLIST_CORPORA = ("_commitments.json", "_action-items.json")
 
-    Returns {"ok", "workspace", "owner", "generated_from": [meetings], "items": [...],
-    "count", "total"} plus "omitted"/"hint" when items were held back. Each item is
-    {id, source, text, status, tier, score, why, first_seen, last_seen, occurrences,
-    requested_by, negative, also}; compact=true keeps only id, source, text, tier,
-    score, why. Reads _commitments.json and _action-items.json only (the roll-up
-    writes them), never the index. tier filters the full ranked list first, then
-    offset skips, then limit caps (the shell's order is never re-sorted); with
-    neither limit nor offset the response self-caps at _WORKLIST_DEFAULT_LIMIT
-    items (GitHub issue #30).
-    """
-    ws, err = _resolve_ws(workspace)
-    if err:
-        return err
-    if tier is not None:
-        raw_tier = (tier or "").strip()
-        tier = raw_tier.upper()
-        if tier not in _WORKLIST_TIERS:
-            return _ws_error(f"invalid tier '{raw_tier}'", "use one of: P1, P2, P3 (case-insensitive)")
-    try:
-        limit = None if limit is None else int(limit)
-    except (TypeError, ValueError):
-        return _ws_error(f"invalid limit '{limit}'", "pass a whole number >= 1")
-    if limit is not None and limit < 1:
-        return _ws_error(f"limit must be >= 1, got {limit}", "pass limit=N to cap the page size")
-    try:
-        offset = int(offset)
-    except (TypeError, ValueError):
-        return _ws_error(f"invalid offset '{offset}'", "pass a whole number >= 0")
-    if offset < 0:
-        return _ws_error(f"offset must be >= 0, got {offset}", "offset is a skip count; 0 is the first page")
-    who = (owner or "").strip() or "me"
-    payload, err = _run_ws(WORKSPACE_PY, ["worklist", ws, "--owner", who], ws)
-    if err:
-        # _run_ws's default hint points at the search index, which this view never reads.
-        err["hint"] = (
-            f"run: whosaid roll-up {ws} --action-items (builds the corpora); pass owner="
-            "<speaker label> when no 'self' role or [workspace] owner is set"
-        )
-        return err
-    data = payload if isinstance(payload, dict) else {}
+
+def _iso_mtime(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _worklist_view(ws: Path, who: str, data: dict, tier: Optional[str], limit: Optional[int],
+                   offset: int, compact: bool) -> dict:
+    """One worklist payload filtered and paged the way the tool documents:
+    tier first, then offset, then limit (default cap when neither is given),
+    then compact. Shared by the live, cached and use_cache answers."""
     items = data.get("items") if isinstance(data.get("items"), list) else []
     if tier is not None:
         items = [it for it in items if isinstance(it, dict) and str(it.get("tier", "")).upper() == tier]
@@ -1770,6 +1773,170 @@ def whosaid_worklist(
     if omitted > 0:
         out["omitted"] = omitted
         out["hint"] = f"more remain: pass offset={offset + len(items)} (or limit/compact) to page"
+    return out
+
+
+def _worklist_cache(ws: Path, who: str) -> tuple:
+    """(cache payload with freshness fields, None) or (None, error dict).
+
+    Read-only: finds the _WORKLIST-<Owner>.json the roll-up writes next to
+    _WORKLIST-<Owner>.md (GitHub issue #113). stale = the corpora's sha256
+    differ from the "corpora" digests the cache records (mtimes when it
+    records none). 'me' resolves the way the CLI
+    does (workspace.resolve_owner: the self-roled speaker, else [workspace]
+    owner), which only reads small per-meeting files, never the corpora."""
+    import workspace as wsmod  # lazy: keeps this module's import cheap
+
+    owner = wsmod.resolve_owner(ws, wsconfig.load_config(ws), who)
+    if not owner:
+        return None, _ws_error(
+            "no cached worklist: owner 'me' does not resolve (no 'self' role, no [workspace] owner)",
+            "pass owner=<speaker label>", category="no_cache")
+    path = ws / wsmod.worklist_cache_filename(owner)
+    try:
+        data = json.loads(path.read_text())
+        cache_mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return None, _ws_error(
+            f"no cached worklist {path.name} in {ws}",
+            f"the roll-up writes it (whosaid roll-up {ws}); until then call without use_cache",
+            category="no_cache")
+    except (OSError, ValueError) as exc:
+        return None, _ws_error(f"cached worklist {path.name} is unreadable: {exc}",
+                               "call without use_cache; the next roll-up rewrites it", category="no_cache")
+    if not isinstance(data, dict):
+        return None, _ws_error(f"cached worklist {path.name} is not a JSON object",
+                               "call without use_cache; the next roll-up rewrites it", category="no_cache")
+    corpora = [(ws / n).stat().st_mtime for n in _WORKLIST_CORPORA if (ws / n).is_file()]
+    newest = max(corpora) if corpora else 0.0
+    recorded = data.get("corpora")
+    if isinstance(recorded, dict):
+        # The roll-up recorded what it built the cache from: compare content.
+        stale = recorded != wsmod.corpora_digests(ws)
+    else:  # a cache written without digests: fall back to mtimes
+        stale = newest > cache_mtime
+    data["owner"] = data.get("owner") or owner
+    meta = {
+        "cache_file": path.name,
+        "generated_at": data.get("generated_at") or _iso_mtime(cache_mtime),
+        "cache_mtime": _iso_mtime(cache_mtime),
+        "corpora_mtime": _iso_mtime(newest) if corpora else None,
+        "stale": stale,
+    }
+    return (data, meta), None
+
+
+def _worklist_timeout_hint(phase: Optional[str]) -> str:
+    """What a timed-out worklist phase implies (GitHub issue #113)."""
+    name = (phase or "").split(" ", 1)[0]
+    if name in ("matcher", "prime"):
+        return ("timed out while the dedupe matcher probed or embedded with the loopback Ollama: "
+                "check that it answers (whosaid_doctor), or set [search] embed = false in "
+                "whosaid.toml to rank with difflib only")
+    if name in ("rank", "match", "score"):
+        return ("timed out ranking: the corpora are large for a live query. Use the cached "
+                "result (use_cache=true), or pass owner=<speaker label>; with [search] embed on, "
+                "embed = false in whosaid.toml ranks faster")
+    if name == "load":
+        return "timed out reading _commitments.json/_action-items.json: check their size and the disk"
+    if name == "write":
+        return "timed out writing the result: retry, or use the cached result (use_cache=true)"
+    return "timed out before the CLI reported a phase: run whosaid_doctor, or use the cached result (use_cache=true)"
+
+
+@mcp.tool(name="whosaid_worklist", description=_DESC_WS_WORKLIST, annotations=_read_only())
+def whosaid_worklist(
+    owner: str = "me",
+    tier: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    compact: bool = False,
+    use_cache: bool = False,
+    workspace: Optional[str] = None,
+) -> dict:
+    """Shell `workspace.py worklist <ws> --owner <owner> --json`.
+
+    Returns {"ok", "workspace", "owner", "generated_from": [meetings], "items": [...],
+    "count", "total", "source": "live"} plus "omitted"/"hint" when items were held back.
+    Each item is {id, source, text, status, tier, score, why, first_seen, last_seen,
+    occurrences, requested_by, negative, also}; compact=true keeps only id, source, text,
+    tier, score, why. Reads _commitments.json and _action-items.json only (the roll-up
+    writes them), never the index. tier filters the full ranked list first, then
+    offset skips, then limit caps (the shell's order is never re-sorted); with
+    neither limit nor offset the response self-caps at _WORKLIST_DEFAULT_LIMIT
+    items (GitHub issue #30).
+
+    GitHub issue #113: when neither corpus exists the answer is category
+    missing_corpora (the only one that recommends a roll-up) without running the
+    CLI. A timeout is category timeout with elapsed_s and phase, a hint for that
+    phase, and, when _WORKLIST-<Owner>.json exists, the cached result as "cached"
+    (sliced the same way, plus generated_at, corpora_mtime, stale). use_cache=true
+    returns that cache directly (source "cache", stale, generated_at) without
+    running the CLI; no cache file is category no_cache. Never writes anything.
+    """
+    ws, err = _resolve_ws(workspace)
+    if err:
+        return err
+    if tier is not None:
+        raw_tier = (tier or "").strip()
+        tier = raw_tier.upper()
+        if tier not in _WORKLIST_TIERS:
+            return _ws_error(f"invalid tier '{raw_tier}'", "use one of: P1, P2, P3 (case-insensitive)")
+    try:
+        limit = None if limit is None else int(limit)
+    except (TypeError, ValueError):
+        return _ws_error(f"invalid limit '{limit}'", "pass a whole number >= 1")
+    if limit is not None and limit < 1:
+        return _ws_error(f"limit must be >= 1, got {limit}", "pass limit=N to cap the page size")
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        return _ws_error(f"invalid offset '{offset}'", "pass a whole number >= 0")
+    if offset < 0:
+        return _ws_error(f"offset must be >= 0, got {offset}", "offset is a skip count; 0 is the first page")
+    who = (owner or "").strip() or "me"
+    if not any((ws / n).is_file() for n in _WORKLIST_CORPORA):
+        return _ws_error(
+            f"no worklist corpora in {ws}: neither _commitments.json nor _action-items.json exists",
+            f"run: whosaid roll-up {ws} --action-items (builds the corpora); pass owner="
+            "<speaker label> when no 'self' role or [workspace] owner is set",
+            category="missing_corpora",
+        )
+    if use_cache:
+        cached, err = _worklist_cache(ws, who)
+        if err:
+            return err
+        data, meta = cached
+        out = _worklist_view(ws, who, data, tier, limit, offset, compact)
+        out.update(source="cache", **meta)
+        return out
+    payload, err = _run_ws(WORKSPACE_PY, ["worklist", ws, "--owner", who], ws)
+    if err:
+        if err.get("category") == "timeout":
+            hint = _worklist_timeout_hint(err.get("phase"))
+            cached, _ = _worklist_cache(ws, who)
+            if cached:
+                data, meta = cached
+                view = _worklist_view(ws, who, data, tier, limit, offset, compact)
+                view.pop("ok", None)
+                view.pop("workspace", None)
+                view.update(meta)
+                err["cached"] = view
+                hint += (f". A cached worklist generated {meta['generated_at']} is attached as "
+                         f"'cached' (stale={str(meta['stale']).lower()}); use_cache=true returns it "
+                         "without re-running this query")
+            else:
+                hint += ". There is no cached worklist (_WORKLIST-<Owner>.json) yet; the next roll-up writes one"
+            err["hint"] = hint
+        else:
+            # The corpora exist, so a rebuild is not the fix; _run_ws's default hint
+            # points at the search index, which this view never reads.
+            err["hint"] = ("the corpora exist; pass owner=<speaker label> when no 'self' role or "
+                           "[workspace] owner is set, else see the error (whosaid_doctor)")
+        return err
+    data = payload if isinstance(payload, dict) else {}
+    out = _worklist_view(ws, who, data, tier, limit, offset, compact)
+    out["source"] = "live"
     return out
 
 

@@ -237,8 +237,11 @@ def main() -> None:
     check("GitHub issue #13" in d_worklist and "P1" in d_worklist and "_WORKLIST-" in d_worklist,
           "worklist desc must cite issue #13, the tiers and the rendered file")
     wprops = dumps["whosaid_worklist"]["inputSchema"]["properties"]
-    check(set(wprops) == {"owner", "workspace", "tier", "limit", "offset", "compact"},
+    check(set(wprops) == {"owner", "workspace", "tier", "limit", "offset", "compact", "use_cache"},
           f"worklist params: {sorted(wprops)}")
+    check(wprops["use_cache"].get("default") is False, f"use_cache defaults off (#113): {wprops['use_cache']}")
+    check(all(t in d_worklist for t in ("use_cache", "missing_corpora", "timeout", "stale", "_WORKLIST-<Owner>.json")),
+          "worklist desc must document use_cache, the error categories and the cache file (#113)")
     check(wprops["owner"].get("default") == "me", f"worklist owner default must be me: {wprops['owner']}")
     check(wprops["offset"].get("default") == 0 and wprops["compact"].get("default") is False,
           f"worklist paging defaults: offset={wprops.get('offset')} compact={wprops.get('compact')}")

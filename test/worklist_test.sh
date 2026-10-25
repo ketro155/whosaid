@@ -29,7 +29,8 @@
 #      own line with the embed server unreachable
 #   7. --json shape and --all-owners --json
 #   8. `whosaid commitments` launcher dispatch + help
-#   9. determinism: a second roll-up rewrites nothing
+#   9. determinism: a second roll-up rewrites nothing (the _WORKLIST-*.json
+#      caches and their generated_at included)
 #  10. issue #23: a self-owned commitment's action-items bullet folds into
 #      its CM item as a second occurrence, and the worklist ranks the item
 #      on BOTH sightings (repeat across meetings, requester from the bullet)
@@ -464,6 +465,33 @@ assert_eq "$RC" 0 "rollup exit code"
 WL="$WS/_WORKLIST-Alice_Example.md"
 assert_file "$WL" "_WORKLIST-Alice_Example.md written (owner = the self-roled speaker)"
 assert_absent "$WS/_WORKLIST-Carol_Example.md" "no per-participant files without --all-owners"
+
+# Issue #113: the roll-up also writes the JSON cache the MCP tool falls back
+# to: exactly the worklist --json payload plus the corpora sha256s it was
+# built from and a generated_at stamp.
+WLJ="$WS/_WORKLIST-Alice_Example.json"
+assert_file "$WLJ" "_WORKLIST-Alice_Example.json cache written next to the .md (issue #113)"
+assert_absent "$WS/_WORKLIST-Carol_Example.json" "no per-participant cache without --all-owners"
+set +e
+python3 "$WS_PY" worklist "$WS" --owner Alice_Example --json > "$TMP/wl_live.json" 2>/dev/null
+set -e
+cat > "$TMP/check_cache.py" <<'PY'
+import json, re, sys
+sys.path.insert(0, sys.argv[1])
+import workspace as w
+from pathlib import Path
+cache = json.loads(Path(sys.argv[2]).read_text())
+live = json.loads(Path(sys.argv[3]).read_text())
+assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00", cache.pop("generated_at")), "generated_at"
+corpora = cache.pop("corpora")
+assert corpora == w.corpora_digests(Path(sys.argv[2]).parent), corpora
+assert set(corpora) == {"_commitments.json", "_action-items.json"}, corpora
+assert cache == live, "cache payload == worklist --json"
+assert w.worklist_cache_filename("Alice Example") == "_WORKLIST-Alice_Example.json"
+print("ok")
+PY
+CACHE_OK="$(run_pycheck "$TMP/check_cache.py" "$REPO/lib" "$WLJ" "$TMP/wl_live.json")" || fail "cache check crashed"
+assert_eq "$CACHE_OK" "ok" "the JSON cache is the --json payload plus corpora digests and generated_at"
 assert_has "# Worklist: Alice_Example" "$WL" "worklist header names the owner"
 assert_has "Tiers: P1 = boss-requested" "$WL" "header states the tier rules"
 assert_has "rebuilt on every roll-up" "$WL" "header says the file is a regenerated view"
@@ -750,7 +778,7 @@ echo "-- determinism --"
 run_ws rollup "$WS" --action-items --all-owners
 assert_eq "$RC" 0 "rollup (settle) exit code"
 shasum "$WS/_INDEX.md" "$WS/_COMMITMENTS.md" "$WS/_commitments.json" "$WS/_ACTION-ITEMS.md" \
-  "$WS/_action-items.json" "$WS/_workspace.json" "$WS"/_WORKLIST-*.md > "$TMP/before.sha"
+  "$WS/_action-items.json" "$WS/_workspace.json" "$WS"/_WORKLIST-*.md "$WS"/_WORKLIST-*.json > "$TMP/before.sha"
 run_ws rollup "$WS" --action-items --all-owners
 assert_eq "$RC" 0 "second rollup exit code"
 shasum -c "$TMP/before.sha" >/dev/null 2>&1 \
@@ -758,6 +786,7 @@ shasum -c "$TMP/before.sha" >/dev/null 2>&1 \
 PASS=$((PASS + 1))
 printf '%s\n' "$ERR" > "$TMP/settle.err"
 assert_has "_WORKLIST-Alice_Example.md (unchanged)" "$TMP/settle.err" "the roll-up reports the unchanged worklist"
+assert_not_has "phase:" "$TMP/settle.err" "phase lines are the worklist CLI's, not the roll-up's (issue #113)"
 
 # ---------------------------------------------------------------------------
 # 10. Issue #23: action-items-sourced occurrences rank like transcript ones.
@@ -840,6 +869,71 @@ print("ok")
 PY
 I23J="$(run_pycheck "$TMP/check_issue23_json.py" "$TMP/wl23.json")" || fail "issue #23 json check crashed"
 assert_eq "$I23J" "ok" "--json reports 2 occurrences (both sources) and the union-ranked tier"
+
+# ---------------------------------------------------------------------------
+# 11. Issue #113: bounded synthetic performance regression. 300 commitments
+#     and 600 action items for one owner (~180k CM x AI pairs to match) must
+#     rank well inside the MCP tool's 60 s budget, difflib-only and with the
+#     fake embedder, and the run must report its phases on stderr. Before the
+#     #113 match-loop fix this size took ~5 s difflib-only on an M-series Mac;
+#     now well under 1 s, so the 15 s bound only trips on a real regression.
+# ---------------------------------------------------------------------------
+echo "-- synthetic perf bound (issue #113) --"
+
+PW="$TMP/ws-perf"
+mkdir -p "$PW"
+cat > "$TMP/check_perf.py" <<'PY'
+import json, random, subprocess, sys, time
+from pathlib import Path
+ws_py, ws = sys.argv[1], Path(sys.argv[2])
+rng = random.Random(113)
+verbs = ["send", "write", "review", "follow up on", "update", "fix", "draft", "schedule",
+         "check", "share", "finish", "test", "deploy", "document", "clean up", "ping"]
+nouns = ["the runbook", "the release notes", "the onboarding doc", "the billing migration",
+         "the dashboard", "the auth flow", "the quarterly report", "the vendor contract",
+         "the incident review", "the API spec", "the load test", "the roadmap slides"]
+tails = ["for the platform team", "before the demo", "by friday", "this week",
+         "with the customer", "after standup", "so we can unblock the release", "", ""]
+def sentence(prefix):
+    return " ".join(x for x in [prefix, rng.choice(verbs), rng.choice(nouns), rng.choice(tails)] if x)
+meetings = [f"2026-{m:02d}-{d:02d}-1000" for m in range(1, 10) for d in (3, 10, 17, 24)]
+owner = "Alice_Example"
+def seen():
+    m = sorted(rng.sample(meetings, rng.randint(1, 3)))
+    return m[0], m[-1], m
+cm, ai = [], []
+for i in range(300):
+    first, last, m = seen()
+    cm.append({"id": f"CM-{i + 1:03d}", "text": sentence("I'll"), "speaker": owner, "status": "open",
+               "first_seen": first, "last_seen": last,
+               "occurrences": [{"meeting": x, "line": 1, "owner": owner, "text": "x"} for x in m]})
+for i in range(600):
+    first, last, m = seen()
+    ai.append({"id": f"AI-{i + 1:03d}", "text": sentence(""), "owner": owner, "status": "open",
+               "type": "action", "first_seen": first, "last_seen": last,
+               "occurrences": [{"meeting": x, "line": 1} for x in m]})
+(ws / "_commitments.json").write_text(json.dumps({"next_id": 301, "folded_meetings": meetings, "items": cm}))
+(ws / "_action-items.json").write_text(json.dumps({"next_id": 601, "folded_meetings": meetings, "items": ai}))
+(ws / "whosaid.toml").write_text('[workspace]\nowner = "Alice_Example"\n[search]\nembed = false\n')
+import os
+for mode, extra in (("difflib", {}), ("fake-embed", {"WHOSAID_EMBED_FAKE": "1"})):
+    env = {**os.environ, **extra}
+    t0 = time.perf_counter()
+    p = subprocess.run([sys.executable, ws_py, "worklist", str(ws), "--owner", owner, "--json"],
+                       capture_output=True, text=True, timeout=60, env=env)
+    dt = time.perf_counter() - t0
+    assert p.returncode == 0, (mode, p.stderr[-500:])
+    items = json.loads(p.stdout)["items"]
+    assert len(items) >= 300 and any(it["also"] for it in items), (mode, len(items))
+    phases = [ln.split("phase: ", 1)[1] for ln in p.stderr.splitlines() if "phase: " in ln]
+    assert phases == ["load", "matcher", f"rank {owner}", f"prime {owner}", f"match {owner}",
+                      f"score {owner}", "write"], (mode, phases)
+    assert dt < 15.0, f"{mode}: worklist took {dt:.1f}s for 300 CM x 600 AI (bound 15 s)"
+    print(f"{mode} {dt:.2f}s", file=sys.stderr)
+print("ok")
+PY
+PERF="$(run_pycheck "$TMP/check_perf.py" "$WS_PY" "$PW")" || fail "perf check crashed or exceeded its bound"
+assert_eq "$PERF" "ok" "300 CM x 600 AI ranks under 15 s (difflib and fake embeddings) with phase lines on stderr"
 
 # ---------------------------------------------------------------------------
 echo ""

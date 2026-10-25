@@ -157,7 +157,12 @@ Subcommands (the `whosaid` bash CLI shells out to this module via
       The roll-up also writes _WORKLIST-<Owner>.md: the owner's open items
       from both corpora, ranked into P1/P2/P3 (see worklist below). --owner
       picks the owner (default "me": the self-roled speaker, else [workspace]
-      owner); --all-owners writes one file per participant.
+      owner); --all-owners writes one file per participant. Next to each
+      it writes _WORKLIST-<Owner>.json: the worklist --json payload plus
+      "corpora" (sha256 of the two corpus files it was built from) and
+      generated_at (UTC ISO, kept while neither changes), the
+      cached result the MCP whosaid_worklist tool falls back to when a live
+      query times out, or returns with use_cache=true (issue #113).
 
   worklist <workspace-dir> [--owner NAME|me] [--all-owners] [--json] [-o FILE]
       "What did I sign up for, across every meeting, ranked" (issue #13).
@@ -183,7 +188,10 @@ Subcommands (the `whosaid` bash CLI shells out to this module via
       the item is no longer P1 on the deadline alone. Within a tier: score
       desc, last_seen desc, id. Cue lists, the boss list and the weights come
       from whosaid.toml [commitments] (boss, deadline_cues, blocking_cues,
-      negators, strong_cues, weak_cues, weights, embed_threshold).
+      negators, strong_cues, weak_cues, weights, embed_threshold). stderr
+      carries one "phase: <name>" line per phase (load, matcher, rank
+      <owner>, prime <owner>, match <owner>, score <owner>, write), so a
+      caller that kills a slow run can say where it was (issue #113).
 
 Everything stays LOCAL: stdlib only, no third-party imports, no network
 (the ollama engine and the optional dedupe embeddings talk only to Ollama
@@ -198,6 +206,7 @@ import copy
 import hashlib
 import json
 import math
+import operator
 import os
 import re
 import subprocess
@@ -313,6 +322,16 @@ STOPWORDS = frozenset(
 
 def log(msg: str) -> None:
     print(f"whosaid: {msg}", file=sys.stderr)
+
+
+# GitHub issue #113: `worklist` turns this on so a caller that kills a slow
+# run can read the last "phase: <name>" line; the roll-up stays quiet.
+PHASE_LOG = False
+
+
+def phase(name: str) -> None:
+    if PHASE_LOG:
+        log(f"phase: {name}")
 
 
 # ---- small shared helpers ------------------------------------------------------
@@ -2133,7 +2152,9 @@ def unit_vector(vec) -> list[float]:
 
 
 def cosine(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
+    # Same products summed in the same order as sum(x * y for x, y in zip(a, b)),
+    # without the generator frame per element (issue #113 hot path).
+    return sum(map(operator.mul, a, b))
 
 
 def fake_embed(norm_text: str) -> list[float]:
@@ -2646,13 +2667,32 @@ def worklist_entries(owner: str, cm_items: list[CommitmentItem], ai_items: list[
     mine_ai = [it for it in ai_items if om.owns(it.owner)]
     entries = [_cm_entry(it) for it in mine_cm]
     hosts = [e for e in entries if e["status"] != "merged"]
+    phase(f"prime {owner}")
     matcher.prime([e["text"] for e in hosts] + [it.text for it in mine_ai])
+    phase(f"match {owner}")
+    # GitHub issue #113: this loop is the worklist's hot spot (every owned AI
+    # item against every host). Only matches()'s verdict is kept, never the
+    # ratio, so each host keeps one SequenceMatcher with the host as seq2 (its
+    # b2j chain is built once, exactly as similarity(ai, host) would build it)
+    # and real_quick_ratio()/quick_ratio(), exact upper bounds on ratio() over
+    # the same denominator, skip the full ratio() when it cannot reach the
+    # threshold. Any bound below the threshold takes the same cosine branch
+    # in matches(), so the result is identical to similarity() per pair.
+    seqs = [difflib.SequenceMatcher(None, "", cand["_norm"]) for cand in hosts]
     for ai in mine_ai:
         e = _ai_entry(ai)
         host = None
         if ai.status != "merged" and e["_norm"]:
-            for cand in hosts:
-                if matcher.matches(e["_norm"], cand["_norm"], similarity(e["_norm"], cand["_norm"])):
+            for cand, sm in zip(hosts, seqs):
+                sm.set_seq1(e["_norm"])
+                ratio = sm.real_quick_ratio()
+                if ratio >= matcher.threshold:
+                    ratio = sm.quick_ratio()
+                    if ratio >= matcher.threshold:
+                        ratio = sm.ratio()
+                if ratio < matcher.threshold and not matcher.semantic:
+                    continue
+                if matcher.matches(e["_norm"], cand["_norm"], ratio):
                     host = cand
                     break
         if host is None:
@@ -2860,9 +2900,41 @@ def render_worklist_md(owner: str, entries: list[dict], generated_from: list[str
     return "\n".join(lines)
 
 
-def worklist_filename(owner: str) -> str:
+def worklist_filename(owner: str, ext: str = ".md") -> str:
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", owner.strip()).strip("_") or "owner"
-    return f"{WORKLIST_FILE_PREFIX}{safe}.md"
+    return f"{WORKLIST_FILE_PREFIX}{safe}{ext}"
+
+
+def worklist_cache_filename(owner: str) -> str:
+    """_WORKLIST-<Owner>.json: the --json payload of the same view plus the
+    corpora digests and generated_at, the cached result whosaid_worklist (MCP) can fall back to
+    when the live query is slow (GitHub issue #113)."""
+    return worklist_filename(owner, ".json")
+
+
+WORKLIST_CORPORA = ("_commitments.json", "_action-items.json")
+
+
+def corpora_digests(ws: Path) -> dict[str, str]:
+    """{corpus file name: sha256} for the worklist corpora that exist: what a
+    cached worklist was built from, so a reader can tell stale from fresh by
+    content rather than by mtimes."""
+    return {n: sha256_file(ws / n) for n in WORKLIST_CORPORA if (ws / n).is_file()}
+
+
+def write_worklist_cache(path: Path, payload: dict, corpora: dict[str, str]) -> bool:
+    """Write the JSON cache (payload + "corpora" digests + generated_at) only
+    when the payload or the corpora changed: an identical re-roll-up keeps the
+    file, its mtime and its generated_at. Returns True if written."""
+    body = {**payload, "corpora": corpora}
+    try:
+        old = json.loads(path.read_text())
+    except (OSError, ValueError):
+        old = None
+    if isinstance(old, dict) and {k: v for k, v in old.items() if k != "generated_at"} == body:
+        return False
+    stamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return write_if_changed(path, json.dumps({**body, "generated_at": stamp}, indent=2) + "\n")
 
 
 def worklist_participants(cm_items: list[ActionItem | CommitmentItem], ai_items: list[ActionItem],
@@ -2890,6 +2962,7 @@ def build_worklist(owner: str, cm_items: list[CommitmentItem], ai_items: list[Ac
     expiry (callers pass worklist_today(); None means the clock)."""
     ranker = Ranker(cfg, latest_meeting(generated_from), today=today)
     entries = worklist_entries(owner, cm_items, ai_items, matcher, owner_aliases(owner, cfg))
+    phase(f"score {owner}")
     rank_entries(entries, ranker)
     return entries, worklist_payload(owner, entries, generated_from)
 
@@ -2897,8 +2970,9 @@ def build_worklist(owner: str, cm_items: list[CommitmentItem], ai_items: list[Ac
 def write_worklists(ws: Path, cfg: dict, matcher: TextMatcher, cm_items: list[CommitmentItem],
                     ai_items: list[ActionItem], generated_from: list[str],
                     owner_arg: str | None, all_owners: bool) -> None:
-    """Roll-up hook: _WORKLIST-<Owner>.md for the resolved owner whenever
-    there is anything to rank, plus one per participant with --all-owners.
+    """Roll-up hook: _WORKLIST-<Owner>.md (plus its _WORKLIST-<Owner>.json
+    cache) for the resolved owner whenever there is anything to rank, plus
+    one pair per participant with --all-owners.
     A missing owner is a NOTE, never a failed roll-up."""
     owner = resolve_owner(ws, cfg, owner_arg)
     targets = worklist_participants(cm_items, ai_items, owner, cfg) if all_owners \
@@ -2907,12 +2981,14 @@ def write_worklists(ws: Path, cfg: dict, matcher: TextMatcher, cm_items: list[Co
         log("NOTE worklist skipped: no owner (tag a 'self' role, set [workspace] owner "
             "in whosaid.toml, or pass --owner)")
     today = worklist_today()
+    corpora = corpora_digests(ws) if targets else {}
     for who in targets:
-        entries, _ = build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today)
+        entries, payload = build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today)
         if not entries and not (who == owner and cm_items):
             continue
         out = ws / worklist_filename(who)
         changed = write_if_changed(out, render_worklist_md(who, entries, generated_from))
+        write_worklist_cache(ws / worklist_cache_filename(who), payload, corpora)
         counts = {t: sum(1 for e in entries if e["open"] and e["tier"] == t) for t in TIERS}
         log(f"worklist ({who}: " + ", ".join(f"{t} {counts[t]}" for t in TIERS)
             + f") -> {out.name}" + ("" if changed else " (unchanged)"))
@@ -2923,6 +2999,12 @@ def cmd_worklist(args: argparse.Namespace) -> int:
     if not ws.is_dir():
         log(f"worklist: workspace dir not found: {ws}")
         return 1
+    # One "phase: <name>" stderr line per phase (GitHub issue #113): a caller
+    # that kills a slow run (the MCP whosaid_worklist timeout) reports the
+    # last one it saw. worklist_entries adds "phase: prime/match <owner>".
+    global PHASE_LOG
+    PHASE_LOG = True
+    phase("load")
     cfg = _wsconfig().load_config(ws)
     cm_data = load_commitments_corpus(ws)
     ai_data = load_corpus(ws)
@@ -2931,6 +3013,7 @@ def cmd_worklist(args: argparse.Namespace) -> int:
     generated_from = sorted(set(cm_data.get("folded_meetings", [])) | set(ai_data.get("folded_meetings", [])))
     threshold = float(cm_data.get("similarity_threshold") or ai_data.get("similarity_threshold")
                       or SIMILARITY_THRESHOLD)
+    phase("matcher")
     matcher = build_matcher(cfg, threshold)
 
     owner = resolve_owner(ws, cfg, args.owner)
@@ -2943,8 +3026,11 @@ def cmd_worklist(args: argparse.Namespace) -> int:
             return 1
         owners = [owner]
     today = worklist_today()
-    built = [build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today)
-             for who in owners]
+    built = []
+    for who in owners:
+        phase(f"rank {who}")
+        built.append(build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today))
+    phase("write")
     if args.json:
         if args.all_owners:
             text = json.dumps({"owners": [payload for _, payload in built]}, indent=2) + "\n"
@@ -3567,11 +3653,6 @@ def cmd_rollup(args: argparse.Namespace) -> int:
     if cm_dropped:
         commitments_data["dropped"] = cm_dropped
 
-    # The worklist is a view over both corpora: regenerated every run, never
-    # reconciled, so it is written after the corpora settle.
-    write_worklists(ws, cfg, matcher, cm_items, items, sorted(cm_folded | folded),
-                    args.owner, args.all_owners)
-
     speakers_texts = {
         m.folder: "\n".join(
             p.read_text() for p in sorted((ws / m.folder).glob("*.speakers.txt"))
@@ -3604,6 +3685,13 @@ def cmd_rollup(args: argparse.Namespace) -> int:
         changed_cm = write_if_changed(cm_out, cm_md)
     else:
         changed_cm_corpus = changed_cm = False
+
+    # The worklist is a view over both corpora: regenerated every run, never
+    # reconciled, so it is written after the corpora settle, and after their
+    # files are on disk so the _WORKLIST-<Owner>.json cache records the
+    # digests of what it was built from (GitHub issue #113).
+    write_worklists(ws, cfg, matcher, cm_items, items, sorted(cm_folded | folded),
+                    args.owner, args.all_owners)
 
     log(f"index -> {index_out}" + ("" if changed else " (unchanged)"))
     log(f"manifest ({len(meetings)} meetings) -> {manifest_out}"

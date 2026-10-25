@@ -351,6 +351,8 @@ def test_workspace_status(ws: Path, fake: FakeRunner) -> None:
 
 def test_worklist(ws: Path, fake: FakeRunner) -> None:
     w = str(ws.resolve())
+    # The tool checks the corpora exist before shelling out (GitHub issue #113).
+    (ws / "_commitments.json").write_text('{"items": []}\n')
     payload = {"owner": "Alice_Example", "generated_from": ["2026-01-05-0900"],
                "items": [{"id": "CM-001", "source": "commitments", "tier": "P1", "score": 5,
                           "why": ["boss"], "text": "send the deck", "status": "open"}]}
@@ -374,7 +376,8 @@ def test_worklist(ws: Path, fake: FakeRunner) -> None:
     fake.queue.append((None, {"ok": False, "error": "worklist: no owner", "hint": "run: whosaid index x"}))
     out = mcp_server.whosaid_worklist()
     check(out["ok"] is False and out["error"] == "worklist: no owner", f"worklist error passthrough: {out}")
-    check("roll-up" in out["hint"] and "whosaid index" not in out["hint"], f"worklist hint names roll-up, not the index: {out['hint']}")
+    check("owner=" in out["hint"] and "whosaid index" not in out["hint"], f"worklist hint names owner=, not the index: {out['hint']}")
+    check("builds the corpora" not in out["hint"], f"corpora exist: no rebuild advice (#113): {out['hint']}")
 
     before = len(fake.calls)
     out = mcp_server.whosaid_worklist(workspace=str(ws.parent / "nope"))
@@ -579,6 +582,145 @@ def test_runner(tmp: Path) -> None:
     finally:
         mcp_server.WS_TIMEOUT = saved
     check(err["ok"] is False and "timed out" in err["error"], f"timeout must error, not raise: {err}")
+    check(err.get("category") == "timeout" and err.get("phase") is None and err.get("elapsed_s", 0) >= 0.3,
+          f"structured timeout, no phase line seen (#113): {err}")
+    for name, e in (("missing", mcp_server._run_ws(missing, ["status", ws], ws)[1]),
+                    ("badjson", mcp_server._run_ws(badjson, ["prs", ws], ws)[1]),
+                    ("absent", mcp_server._run_ws(fakes / "absent.py", ["prs", ws], ws)[1])):
+        want = {"missing": "exit_1", "badjson": "bad_json", "absent": "missing_script"}[name]
+        check(e.get("category") == want, f"{name} category {want}: {e}")
+
+
+def test_worklist_diagnostics(tmp: Path) -> None:
+    """GitHub issue #113 acceptance: missing corpora, a deliberately delayed
+    ranking run, and the stale/fresh cached worklist each give a distinct,
+    structured answer; use_cache reads the cache without shelling out."""
+    root = tmp / "wl113"
+    root.mkdir()
+
+    def new_ws(name: str, corpora: bool) -> Path:
+        ws = root / name
+        ws.mkdir()
+        (ws / "whosaid.toml").write_text('[workspace]\nowner = "Alice_Example"\n')
+        if corpora:
+            (ws / "_commitments.json").write_text('{"items": []}\n')
+            (ws / "_action-items.json").write_text('{"items": []}\n')
+        return ws.resolve()
+
+    cache_items = [{"id": f"CM-{i:03d}", "source": "commitments", "text": f"send deck {i}",
+                    "status": "open", "tier": "P1" if i == 0 else "P3", "score": 9 - i,
+                    "why": ["boss"], "first_seen": "2026-01-05", "last_seen": "2026-01-05",
+                    "occurrences": 1, "requested_by": "", "negative": False, "also": [],
+                    "merged_into": ""} for i in range(3)]
+
+    def write_cache(ws: Path, age_vs_corpora: float, digests: str = "") -> Path:
+        """digests: '' = none recorded (mtime rule), 'match' / 'mismatch' = the roll-up's sha256s."""
+        cache = ws / "_WORKLIST-Alice_Example.json"
+        body = {"owner": "Alice_Example", "generated_from": ["2026-01-05-0900"],
+                "items": cache_items, "generated_at": "2026-01-06T10:00:00+00:00"}
+        if digests:
+            import workspace
+            body["corpora"] = workspace.corpora_digests(ws)
+            if digests == "mismatch":
+                body["corpora"]["_action-items.json"] = "0" * 64
+        cache.write_text(json.dumps(body))
+        base = max((ws / n).stat().st_mtime for n in ("_commitments.json", "_action-items.json"))
+        os.utime(cache, (base + age_vs_corpora, base + age_vs_corpora))
+        return cache
+
+    def never(*a, **k):
+        raise AssertionError(f"_run_ws must not be called: {a}")
+
+    saved_runner, saved_py, saved_timeout = mcp_server._run_ws, mcp_server.WORKSPACE_PY, mcp_server.WS_TIMEOUT
+    try:
+        # 1) missing corpora: its own category, the only path that says roll-up, no subprocess
+        mcp_server._run_ws = never
+        bare = new_ws("bare", corpora=False)
+        out = mcp_server.whosaid_worklist(workspace=str(bare))
+        print("example missing_corpora:", json.dumps(out))
+        check(out["ok"] is False and out.get("category") == "missing_corpora", f"missing corpora category: {out}")
+        check("whosaid roll-up" in out["hint"] and "--action-items" in out["hint"], f"missing corpora hint: {out}")
+        out = mcp_server.whosaid_worklist(workspace=str(bare), use_cache=True)
+        check(out.get("category") == "missing_corpora", f"use_cache without corpora is missing_corpora too: {out}")
+        mcp_server._run_ws = saved_runner
+
+        # 2) delayed ranking: a fake workspace.py that reaches the match phase then hangs
+        fakes = root / "fakelib"
+        fakes.mkdir()
+        slow = fakes / "workspace.py"
+        slow.write_text(
+            "import sys, time\n"
+            "print('whosaid: phase: load', file=sys.stderr, flush=True)\n"
+            "print('whosaid: dedupe: difflib >= 0.82 (embeddings off)', file=sys.stderr, flush=True)\n"
+            "print('whosaid: phase: match ' + sys.argv[4], file=sys.stderr, flush=True)\n"
+            "time.sleep(6)\n"
+        )
+        mcp_server.WORKSPACE_PY = slow
+        mcp_server.WS_TIMEOUT = 0.8
+        ws = new_ws("delayed", corpora=True)
+        out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example")
+        print("example timeout (no cache):", json.dumps(out))
+        check(out["ok"] is False and out.get("category") == "timeout", f"timeout category: {out}")
+        check(out.get("phase") == "match Alice_Example", f"timeout names the last phase: {out}")
+        check(isinstance(out.get("elapsed_s"), (int, float)) and 0.8 <= out["elapsed_s"] < 6, f"elapsed_s: {out}")
+        check("builds the corpora" not in out["hint"] and "large" in out["hint"], f"match-phase hint, no rebuild: {out}")
+        check("cached" not in out and "no cached worklist" in out["hint"], f"no cache yet: {out}")
+
+        # the same timeout during prime/matcher points at Ollama / [search] embed instead
+        slow.write_text(
+            "import sys, time\n"
+            "print('whosaid: phase: prime ' + sys.argv[4], file=sys.stderr, flush=True)\n"
+            "time.sleep(6)\n"
+        )
+        out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example")
+        check(out.get("category") == "timeout" and out.get("phase") == "prime Alice_Example", f"prime phase: {out}")
+        check("Ollama" in out["hint"] and "[search] embed" in out["hint"], f"prime-phase hint: {out}")
+
+        # 3) timeout + a cache newer than both corpora: attached, stale false, sliced like a fresh result
+        write_cache(ws, +60)
+        out = mcp_server.whosaid_worklist(workspace=str(ws), owner="me", limit=2, compact=True)
+        print("example timeout + fresh cache:", json.dumps(out))
+        cached = out.get("cached") or {}
+        check(out.get("category") == "timeout" and cached.get("stale") is False, f"fresh cache: {out}")
+        check(cached.get("generated_at") == "2026-01-06T10:00:00+00:00" and cached.get("corpora_mtime"), f"freshness: {cached}")
+        check([it["id"] for it in cached.get("items", [])] == ["CM-000", "CM-001"] and cached.get("total") == 3,
+              f"cache sliced like a fresh result: {cached}")
+        check(set(cached["items"][0]) == set(mcp_server._WORKLIST_COMPACT_KEYS), f"compact applies: {cached['items'][0]}")
+        check("use_cache=true" in out["hint"], f"timeout hint points at the cache: {out['hint']}")
+
+        # recorded digests win over mtimes: same content but an older file is still fresh,
+        # a newer file built from other content is stale
+        write_cache(ws, -60, digests="match")
+        out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example")
+        check((out.get("cached") or {}).get("stale") is False, f"matching digests: fresh despite mtime: {out}")
+        write_cache(ws, +60, digests="mismatch")
+        out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example")
+        check((out.get("cached") or {}).get("stale") is True, f"other digests: stale despite mtime: {out}")
+
+        # 4) timeout + a cache older than the corpora: stale true
+        write_cache(ws, -60)
+        out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example", tier="p1")
+        print("example timeout + stale cache:", json.dumps(out))
+        cached = out.get("cached") or {}
+        check(cached.get("stale") is True, f"stale cache: {out}")
+        check([it["id"] for it in cached.get("items", [])] == ["CM-000"] and cached.get("tier") == "P1", f"tier on cache: {cached}")
+
+        # 5) use_cache=true: the cached result directly, never the subprocess
+        mcp_server._run_ws = never
+        out = mcp_server.whosaid_worklist(workspace=str(ws), use_cache=True, limit=1)
+        print("example use_cache:", json.dumps(out))
+        check(out["ok"] is True and out.get("source") == "cache" and out.get("stale") is True, f"use_cache: {out}")
+        check(out["generated_at"] == "2026-01-06T10:00:00+00:00" and out["owner"] == "Alice_Example", f"use_cache meta: {out}")
+        check(out["count"] == 1 and out["total"] == 3 and out["omitted"] == 2, f"use_cache pages: {out}")
+
+        # 6) use_cache=true with no cache file: no_cache, still no subprocess
+        (ws / "_WORKLIST-Alice_Example.json").unlink()
+        out = mcp_server.whosaid_worklist(workspace=str(ws), use_cache=True)
+        print("example no_cache:", json.dumps(out))
+        check(out["ok"] is False and out.get("category") == "no_cache", f"no_cache: {out}")
+        check("_WORKLIST-Alice_Example.json" in out["error"], f"no_cache names the file: {out}")
+    finally:
+        mcp_server._run_ws, mcp_server.WORKSPACE_PY, mcp_server.WS_TIMEOUT = saved_runner, saved_py, saved_timeout
 
 
 # ---------------------------------------------------------------------------
@@ -1001,6 +1143,7 @@ def main() -> None:
             test_reprocess(tmp)
             test_fold_metadata(tmp)
             test_diarization_failure(tmp)
+            test_worklist_diagnostics(tmp)
             test_resources(tmp)
             test_registration()
         finally:
