@@ -256,7 +256,7 @@ def main() -> None:
     cprops = dumps["whosaid_context"]["inputSchema"]["properties"]
     check(cprops["before"].get("default") == 60 and cprops["after"].get("default") == 120, "context window defaults 60/120")
     check(set(dumps["whosaid_item"]["inputSchema"].get("required", [])) == {"id"}, "item requires id")
-    check(set(dumps["whosaid_items"]["inputSchema"]["properties"]) == {"owner", "requester", "status", "type", "workspace"}, "items filters")
+    check(set(dumps["whosaid_items"]["inputSchema"]["properties"]) == {"owner", "requester", "status", "type", "workspace", "limit", "offset", "compact"}, "items filters + paging")
     check(set(dumps["whosaid_person"]["inputSchema"].get("required", [])) == set(), "person name is optional")
     check(set(dumps["whosaid_workspace_status"]["inputSchema"]["properties"]) == {"workspace"}, "workspace_status takes only workspace")
     for name in ("whosaid_prs", "whosaid_speakers"):

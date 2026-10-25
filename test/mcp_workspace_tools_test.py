@@ -414,6 +414,7 @@ def test_list_paging(ws: Path, fake: FakeRunner) -> None:
     out = mcp_server.whosaid_meetings(limit=2, offset=1, compact=True)
     check([m["folder"] for m in out["meetings"]] == ["2026-01-04-0900", "2026-01-03-0900"], f"page: {out}")
     check(out["omitted"] == 3 and "offset=3" in out["hint"] and out["offset"] == 1, f"omitted/hint: {out}")
+    check(out["next_offset"] == 3, f"next_offset on a partial page: {out}")
     check(out["compact"] is True and set(out["meetings"][0]) == {"folder", "kind", "created", "minutes"},
           f"compact keys: {out['meetings'][0]}")
 
@@ -437,6 +438,84 @@ def test_list_paging(ws: Path, fake: FakeRunner) -> None:
         check([r["x"] for r in out[key]] == list(range(110, 120)) and "omitted" not in out, f"{key} last page")
         n = len(fake.calls)
         check(fn(limit=0)["ok"] is False and len(fake.calls) == n, f"{key} limit=0 errors")
+
+
+def test_items_paging(ws: Path, fake: FakeRunner) -> None:
+    """whosaid_items: bounded default page, offset paging, compact, stable order (GitHub issue #112)."""
+    w = str(ws.resolve())
+    db = mcp_server.wsconfig.search_db(ws)
+    # 250 generated items (AI-001..AI-250) plus two past 999, shuffled so order must come from the tool
+    ids = [f"AI-{i:03d}" for i in range(1, 251)] + ["AI-1000", "AI-1001"]
+    expect = sorted(ids, key=lambda s: int(s.split("-")[1]))
+    check(expect[-2:] == ["AI-1000", "AI-1001"], "fixture: numeric order puts AI-1000 after AI-250")
+    rows = [{"id": i, "text": f"do thing {i}", "owner": "Bob_Example", "status": "open", "type": "task",
+             "first_seen": "2026-01-05", "last_seen": "2026-01-06", "span": 1, "merged_into": None,
+             "occurrences": 1 + n % 3, "requesters": ["Alice_Example"]}
+            for n, i in enumerate(ids)]
+    shuffled = rows[::-1]
+
+    if db.exists():
+        db.unlink()
+    fake.queue.append((list(shuffled), None))
+    out = mcp_server.whosaid_items()
+    check(out["ok"] is True and out["index_mtime"] is None, f"index_mtime null without an index: {out.get('index_mtime')}")
+    check(out["count"] == 50 and len(out["items"]) == 50 and out["total"] == 252 and out["omitted"] == 202,
+          f"default call is bounded: count={out['count']} total={out['total']} omitted={out.get('omitted')}")
+    check(out["limit"] == 50 and out["next_offset"] == 50, f"next-page indicator: {out}")
+    check([r["id"] for r in out["items"]] == expect[:50], "default page is the first 50 in numeric id order")
+    check(set(out["items"][0]) >= {"requesters", "first_seen", "span"}, "non-compact keeps full item dicts")
+    check("compact" not in out, "compact flag absent by default")
+
+    db.write_bytes(b"")
+    m = __import__("datetime").datetime.fromtimestamp(db.stat().st_mtime, __import__("datetime").timezone.utc).isoformat()
+    fake.queue.append((list(shuffled), None))
+    out = mcp_server.whosaid_items()
+    check(out["index_mtime"] is not None and out["index_mtime"].replace("Z", "+00:00")[:19] == m[:19],
+          f"index_mtime is the db mtime in UTC: {out['index_mtime']} vs {m}")
+    db.unlink()
+
+    # walk every page with next_offset: each id exactly once, in order
+    seen, off, pages = [], 0, 0
+    while off is not None:
+        fake.queue.append((list(shuffled), None))
+        out = mcp_server.whosaid_items(limit=40, offset=off)
+        seen += [r["id"] for r in out["items"]]
+        off = out.get("next_offset")
+        pages += 1
+        check(pages < 20, "paging must terminate")
+        check(off is None or off == len(seen), f"next_offset follows the rows returned: {off} vs {len(seen)}")
+    check(seen == expect, f"paging retrieves all 252 without duplicates or omissions ({len(seen)} rows)")
+    check(pages == 7 and "next_offset" not in out and "omitted" not in out, f"last page: pages={pages} {out.get('omitted')}")
+
+    # ties on the numeric suffix fall back to the id string, so the order is total
+    fake.queue.append(([{"id": "AI-5b"}, {"id": "AI-5a"}, {"id": "AI-4"}], None))
+    out = mcp_server.whosaid_items()
+    check([r["id"] for r in out["items"]] == ["AI-4", "AI-5a", "AI-5b"], f"tie-breaker: {out['items']}")
+
+    # compact: exactly the six keys, evidence availability is the occurrences count
+    fake.queue.append((list(shuffled), None))
+    out = mcp_server.whosaid_items(compact=True, limit=3)
+    check(out["compact"] is True and all(set(r) == {"id", "text", "type", "owner", "status", "occurrences"}
+                                         for r in out["items"]), f"compact keys: {out['items'][0]}")
+    check(out["items"][0]["id"] == "AI-001" and out["items"][0]["occurrences"] == rows[0]["occurrences"],
+          f"compact row values: {out['items'][0]}")
+
+    # filters go to the CLI before paging; paging args never do
+    fake.queue.append((list(shuffled), None))
+    mcp_server.whosaid_items(owner="Bob_Example", status="open", type="task", limit=5, offset=10, compact=True)
+    check(fake.last()[1] == ["items", w, "--owner", "Bob_Example", "--status", "open", "--type", "task"],
+          f"filters pass through, paging stays in Python: {fake.last()[1]}")
+
+    # offset past the end: empty page, no next_offset
+    fake.queue.append((list(shuffled), None))
+    out = mcp_server.whosaid_items(offset=1000)
+    check(out["items"] == [] and out["count"] == 0 and out["total"] == 252 and "next_offset" not in out,
+          f"offset past the end: {out}")
+
+    for bad in ({"limit": 0}, {"limit": "x"}, {"offset": -1}, {"offset": "y"}):
+        n = len(fake.calls)
+        out = mcp_server.whosaid_items(**bad)
+        check(out["ok"] is False and len(fake.calls) == n, f"{bad} must error before shelling: {out}")
 
 
 def test_worklist_paging(ws: Path, fake: FakeRunner) -> None:
@@ -993,6 +1072,7 @@ def main() -> None:
             test_worklist(ws, fake)
             test_worklist_paging(ws, fake)
             test_list_paging(ws, fake)
+            test_items_paging(ws, fake)
 
             mcp_server._run_ws = real_runner
             clear_env()
