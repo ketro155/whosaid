@@ -6,6 +6,30 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **`roll-up` refolds only the commitment folders that changed (#98).** A Teams delta that
+  touched one `teams.speakers.txt` used to refold the whole commitments corpus (minutes of
+  CPU on a few hundred folders, `already folded (skipping)` printed 0 times). Now only
+  folders whose fingerprint changed, or that are new or gone, are refolded: their
+  occurrences are stripped from every item (merged ones too), the fold re-reads just them,
+  and items that lost or gained evidence get their cue, negation, boss priority, requester
+  and speaker re-derived from what is left before hand edits are re-applied, so a strong cue
+  from a removed line no longer sticks. Ids never move, new items mint from the persisted
+  `next_id`, and an uncurated item left with no occurrence is dropped. On a synthetic
+  300-folder workspace a one-line delta went from 24.3 s to 5.8 s with the same corpus.
+  A `[commitments]` change in `whosaid.toml` (now tracked as `cues_fingerprint`), or a
+  corpus written before this release, still takes the full refresh once.
+- **Roll-up shows progress and logs final ids.** A long commitments fold prints
+  `folded N/M commitment folder(s)` every 25 folders, an incremental run names its changed
+  folders, and the full refresh prints its `+`/`=` item lines after ids are restored, so the
+  log never names a provisional `CM-` id that does not exist (an item that got its old id
+  back logs as kept).
+- **Possible-duplicate pairs survive incremental runs.** Fold-time near misses are kept in
+  `_commitments.json` (`near_misses`, per meeting), so a pair only the fold sees stays in
+  the review section when other folders refold. The all-pairs review pass also skips
+  pairs that cannot reach the band before running the full difflib ratio (same output).
+
 ## [1.15.1] - 2026-10-23
 
 ### Fixed

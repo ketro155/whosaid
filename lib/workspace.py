@@ -1514,10 +1514,20 @@ def possible_duplicates(items: list[ActionItem],
         add(id_a, id_b, ratio)
     live = [it for it in items if it.status != "merged"]
     norms = [normalize_text(it.text) for it in live]
-    for i in range(len(live)):
-        for j in range(i + 1, len(live)):
-            ratio = similarity(norms[i], norms[j])
-            if threshold - NEAR_MISS_BAND <= ratio < threshold:
+    # Same pairs and the same similarity(norms[i], norms[j]) as a plain double
+    # loop, but b (norms[j]) is fixed in the inner loop so difflib caches it,
+    # and real_quick_ratio/quick_ratio (upper bounds of ratio) skip pairs that
+    # cannot reach the band. Output is identical; this all-pairs pass runs on
+    # every roll-up, so it dominated a small incremental run (issue #98).
+    low = threshold - NEAR_MISS_BAND
+    for j in range(1, len(live)):
+        sm = difflib.SequenceMatcher(None, "", norms[j])
+        for i in range(j):
+            sm.set_seq1(norms[i])
+            if sm.real_quick_ratio() < low or sm.quick_ratio() < low:
+                continue
+            ratio = sm.ratio()
+            if low <= ratio < threshold:
                 add(live[i].id, live[j].id, ratio)
     return sorted(((a, b, r) for (a, b), r in best.items()),
                   key=lambda x: (-x[2], x[0], x[1]))
@@ -1830,13 +1840,23 @@ def parse_action_items_commitments(md_text: str, meeting: str,
     return out
 
 
+def _item_line(item_log: list | None, item: "CommitmentItem", kind: str, rest: str) -> None:
+    """Log a fold's per-item line now, or defer it (with the item object, so
+    the id printed later is whatever the item ends up with)."""
+    if item_log is None:
+        log(f"  {kind} {item.id} {rest}")
+    else:
+        item_log.append((item, kind, rest))
+
+
 def fold_commitments(meeting_folder: str, entries: list[dict],
                      items: list[CommitmentItem], next_id: list[int],
                      threshold: float = SIMILARITY_THRESHOLD,
                      near_misses: list[tuple[str, str, float]] | None = None,
                      matcher: "TextMatcher | None" = None,
                      cues: dict | None = None,
-                     dropped: list[dict] | None = None) -> list[CommitmentItem]:
+                     dropped: list[dict] | None = None,
+                     item_log: list | None = None) -> list[CommitmentItem]:
     """Fold one meeting's commitments.json entries into the corpus. The
     ranking inputs (cue, negative, requested_by_role) ride along on new items;
     on a match a stronger cue, a positive re-statement, or a first requester
@@ -1847,7 +1867,10 @@ def fold_commitments(meeting_folder: str, entries: list[dict],
     Its min_words drives the same fragment_check() as extraction: an entry
     that fails is skipped (never a CM item), logged, and appended to
     `dropped` as {meeting, speaker, time, text, reason} when a list is
-    passed. Items already in the corpus are never re-checked."""
+    passed. Items already in the corpus are never re-checked. `item_log`
+    (optional) collects the per-item '+'/'=' lines as (item, kind, rest)
+    instead of logging them, so a caller that renumbers afterwards (the
+    full refresh) can print the final ids (issue #98)."""
     strong_cues = list((cues or WORKLIST_DEFAULTS)["strong_cues"])
     weak_cues = list((cues or WORKLIST_DEFAULTS)["weak_cues"])
     min_words = int((cues or WORKLIST_DEFAULTS).get("min_words", COMMITMENT_MIN_WORDS))
@@ -1907,7 +1930,7 @@ def fold_commitments(meeting_folder: str, entries: list[dict],
             next_id[0] += 1
             items.append(item)
             target = item
-            log(f"  + {item.id} (new): {text}")
+            _item_line(item_log, item, "+", f"(new): {text}")
         else:
             if not target.speaker and speaker:
                 target.speaker = speaker
@@ -1928,7 +1951,7 @@ def fold_commitments(meeting_folder: str, entries: list[dict],
             if not any(o.meeting == meeting_folder and o.source == "transcript"
                        for o in target.occurrences):
                 target.occurrences.append(occ)
-            log(f"  = {target.id} (dedup, {len(target.occurrences)}×): {text}")
+            _item_line(item_log, target, "=", f"(dedup, {len(target.occurrences)}×): {text}")
         if best_below is not None and near_misses is not None:
             near_misses.append((target.id, best_below[1].id, best_below[0]))
     return items
@@ -1939,7 +1962,8 @@ def fold_action_items(meeting_folder: str, rows: list[dict],
                       threshold: float = SIMILARITY_THRESHOLD,
                       near_misses: list[tuple[str, str, float]] | None = None,
                       matcher: "TextMatcher | None" = None,
-                      roles: dict | None = None) -> list[CommitmentItem]:
+                      roles: dict | None = None,
+                      item_log: list | None = None) -> list[CommitmentItem]:
     """Fold one meeting's action-items.md commitment rows (graph.py's
     parse_commitments output, already filtered to the self-roled owner)
     into the corpus (issue #23): the same TextMatcher threshold and 0.10
@@ -1995,7 +2019,7 @@ def fold_action_items(meeting_folder: str, rows: list[dict],
             next_id[0] += 1
             items.append(item)
             target = item
-            log(f"  + {item.id} (new, action-items): {text}")
+            _item_line(item_log, item, "+", f"(new, action-items): {text}")
         else:
             if not target.speaker and owner:
                 target.speaker = owner
@@ -2007,7 +2031,7 @@ def fold_action_items(meeting_folder: str, rows: list[dict],
             if not any(o.source == "action-items" and o.meeting == meeting_folder
                        and o.line == line and o.t_sec == occ.t_sec for o in target.occurrences):
                 target.occurrences.append(occ)
-            log(f"  = {target.id} (dedup, {len(target.occurrences)}×): {text}")
+            _item_line(item_log, target, "=", f"(dedup, {len(target.occurrences)}×): {text}")
         if best_below is not None and near_misses is not None:
             near_misses.append((target.id, best_below[1].id, best_below[0]))
     return items
@@ -3061,6 +3085,156 @@ def restore_commitment_edits(fresh: list[CommitmentItem],
     return renamed
 
 
+# ---- rollup: incremental commitment refold (issue #98) -------------------------
+
+CM_PROGRESS_EVERY = 25  # 'folded N/M' every this many folded folders
+CM_CHANGED_NAMES_SHOWN = 10
+
+
+def cues_fingerprint(cues: dict) -> str:
+    """Identity of the extractor configuration ([commitments] cues and
+    min_words). A change here re-derives every item, so it keeps the full
+    refresh; anything else refolds only the folders that changed."""
+    return hashlib.sha256(json.dumps(cues, sort_keys=True).encode()).hexdigest()
+
+
+def commitment_is_curated(it: CommitmentItem, items: list[CommitmentItem]) -> bool:
+    """CommitmentItem analogue of _curated: state that must outlive the
+    item's last occurrence (a hand edit, a non-open status, or any merge
+    relationship)."""
+    return (bool(it.curated)
+            or it.status != "open"
+            or bool(it.merged_into)
+            or any(o.merged_into == it.id for o in items))
+
+
+class _CmSourceLookup:
+    """Per-meeting fields an occurrence does not carry: a transcript entry's
+    priority (commitments.json) and a bullet's AI-NNN refs (action-items.md),
+    keyed by the occurrence's line. Read lazily, once per meeting."""
+
+    def __init__(self, ws: Path):
+        self.ws = ws
+        self._priority: dict[str, dict[int, str]] = {}
+        self._refs: dict[str, dict[int, str]] = {}
+
+    def priority(self, o: CmOccurrence) -> str | None:
+        if o.meeting not in self._priority:
+            out: dict[int, str] = {}
+            try:
+                data = json.loads((self.ws / o.meeting / "commitments.json").read_text())
+                for n, e in enumerate(data.get("items", []) if isinstance(data, dict) else [], 1):
+                    if isinstance(e, dict):
+                        out[int(e.get("line", n))] = str(e.get("priority") or "normal")
+            except (OSError, ValueError, TypeError):
+                pass
+            self._priority[o.meeting] = out
+        return self._priority[o.meeting].get(o.line)
+
+    def refs(self, o: CmOccurrence) -> str:
+        if o.meeting not in self._refs:
+            out: dict[int, str] = {}
+            try:
+                md = (self.ws / o.meeting / "action-items.md").read_text()
+                for row in parse_action_items_commitments(md, o.meeting, ""):
+                    out[row["line"]] = merge_ai_refs(out.get(row["line"], ""), row["ai_refs"])
+            except OSError:
+                pass
+            self._refs[o.meeting] = out
+        return self._refs[o.meeting].get(o.line, "")
+
+
+def recompute_commitment_derived(it: CommitmentItem, cues: dict | None,
+                                 lookup: _CmSourceLookup) -> None:
+    """Re-derive an item's extractor fields from the occurrences it still
+    has, replaying fold_commitments / fold_action_items in fold order (the
+    first occurrence plays the 'new item' branch, the rest the 'match'
+    branch). Then reset source_values to those derived values and re-apply
+    the item's curation, so a strong cue (or boss priority, requester...)
+    that came from a since-removed line does not stick, and a hand edit
+    still wins. Priority comes from the source entry when it is still
+    there, else from a boss requester role as the extractor sets it."""
+    strong = list((cues or WORKLIST_DEFAULTS)["strong_cues"])
+    weak = list((cues or WORKLIST_DEFAULTS)["weak_cues"])
+    rank = {"transcript": 0}
+    it.occurrences.sort(key=lambda o: (o.meeting, rank.get(o.source, 1)))
+    occs = it.occurrences
+    if not occs:
+        return
+
+    def priority_of(o: CmOccurrence) -> str:
+        if o.source != "transcript":
+            return "normal"
+        p = lookup.priority(o)
+        if p is None:
+            p = "high" if str(o.requester_role or "").strip().lower() == "boss" else "normal"
+        return p
+
+    first = occs[0]
+    d = {"text": first.text or it.text, "speaker": first.owner,
+         "priority": priority_of(first) or "normal",
+         "requested_by": first.requester or "", "requested_by_role": first.requester_role or "",
+         "cue": (first.cue or "") if first.source == "transcript" else "",
+         "negative": bool(first.negative) if first.source == "transcript" else False,
+         "ai_refs": lookup.refs(first) if first.source != "transcript" else ""}
+    for o in occs[1:]:
+        if not d["speaker"] and o.owner:
+            d["speaker"] = o.owner
+        if not d["requested_by"] and o.requester:
+            d["requested_by"], d["requested_by_role"] = o.requester, o.requester_role or ""
+        if o.source == "transcript":
+            if priority_of(o) == "high":
+                d["priority"] = "high"
+            cue = o.cue or ""
+            if not d["cue"] or (cue_strength(cue, strong, weak) == "strong"
+                                and cue_strength(d["cue"], strong, weak) != "strong"):
+                d["cue"] = cue or d["cue"]
+            if d["negative"] and not o.negative:
+                d["negative"] = False
+        else:
+            d["ai_refs"] = merge_ai_refs(d["ai_refs"], lookup.refs(o))
+    for key, value in d.items():
+        setattr(it, key, value)
+    it.first_seen = min(o.meeting for o in occs)
+    it.last_seen = max(o.meeting for o in occs)
+    baseline = dict(it.source_values) if it.source_values else {
+        "status": "open", "merged_into": ""}
+    baseline.update(d)
+    it.source_values = {k: baseline.get(k, getattr(it, k)) for k in CM_CURATED_FIELDS}
+    for key, value in it.curated.items():
+        if key in CM_CURATED_FIELDS:
+            setattr(it, key, value)
+
+
+def propagate_merged_occurrences(items: list[CommitmentItem]) -> None:
+    """A refolded line can re-match a hand-merged item instead of its
+    survivor; mirror its occurrences onto the survivor, as the tail of
+    restore_commitment_edits does on the full refresh."""
+    by_id = {it.id: it for it in items}
+    for it in items:
+        if it.status != "merged" or not it.merged_into:
+            continue
+        survivor = by_id.get(it.merged_into)
+        if survivor is None:
+            continue
+        have = {(o.meeting, o.source, o.t_sec, normalize_text(o.text)) for o in survivor.occurrences}
+        survivor.occurrences.extend(o for o in it.occurrences
+                                    if (o.meeting, o.source, o.t_sec, normalize_text(o.text))
+                                    not in have)
+
+
+def strip_commitment_meetings(items: list[CommitmentItem], meetings: set[str]) -> set[int]:
+    """Remove every occurrence whose meeting is in `meetings` from all items
+    (merged ones included). Returns id() of the items that lost one."""
+    lost: set[int] = set()
+    for it in items:
+        kept = [o for o in it.occurrences if o.meeting not in meetings]
+        if len(kept) != len(it.occurrences):
+            lost.add(id(it))
+            it.occurrences = kept
+    return lost
+
+
 def cmd_rollup(args: argparse.Namespace) -> int:
     if not 0.5 <= args.similarity_threshold <= 1.0:
         log(f"rollup: --similarity-threshold must be between 0.5 and 1.0 "
@@ -3209,18 +3383,64 @@ def cmd_rollup(args: argparse.Namespace) -> int:
 
     remember_commitment_edits(cm_items)
     fingerprints = commitment_fingerprints(dated, cm_cues)
+    cues_fp = cues_fingerprint(cm_cues)
     previous_cm_items = copy.deepcopy(cm_items)
-    refresh_cm = bool(cm_folded) and commitments_data.get("source_fingerprints") != fingerprints
-    if refresh_cm:
-        log("commitment sources/roles changed: replacing derived contributions; preserving curation")
-        cm_items, cm_folded = [], set()
-    cm_near_misses: list[tuple[str, str, float]] = []
+    old_fingerprints = commitments_data.get("source_fingerprints")
+    sources_changed = bool(cm_folded) and old_fingerprints != fingerprints
+    # Issue #98: a per-folder change refolds only that folder. The full
+    # refresh (refold everything, restore ids) stays for an extractor-config
+    # change, and for corpora written before cues_fingerprint existed.
+    incremental_cm = (sources_changed and isinstance(old_fingerprints, dict)
+                      and commitments_data.get("cues_fingerprint") == cues_fp)
+    refresh_cm = sources_changed and not incremental_cm
+    cm_changed: set[str] = set()
+    cm_lost: set[int] = set()
     # Fold-time fragment near misses live in the corpus JSON so the review
     # section survives incremental runs (folded meetings are not re-read).
     cm_dropped: list[dict] = list(commitments_data.get("dropped", []))
     if refresh_cm:
+        log("commitment extractor config ([commitments] cues) changed or corpus predates "
+            "per-folder refold: replacing derived contributions; preserving curation")
+        cm_items, cm_folded = [], set()
         cm_dropped = []
+    elif incremental_cm:
+        changed = sorted(name for name, fp in fingerprints.items()
+                         if old_fingerprints.get(name) != fp)
+        removed = sorted(set(old_fingerprints) - set(fingerprints))
+        cm_changed = set(changed) | set(removed)
+        shown = changed[:CM_CHANGED_NAMES_SHOWN]
+        more = f" (+{len(changed) - len(shown)} more)" if len(changed) > len(shown) else ""
+        if changed:
+            log(f"refolding {len(changed)} changed commitment folder(s): "
+                f"{', '.join(shown)}{more}")
+        if removed:
+            log(f"dropping {len(removed)} removed folder(s) from the commitments corpus: "
+                f"{', '.join(removed[:CM_CHANGED_NAMES_SHOWN])}"
+                + (f" (+{len(removed) - CM_CHANGED_NAMES_SHOWN} more)"
+                   if len(removed) > CM_CHANGED_NAMES_SHOWN else ""))
+        cm_lost = strip_commitment_meetings(cm_items, cm_changed)
+        cm_folded -= cm_changed
+        cm_dropped = [d for d in cm_dropped if d.get("meeting") not in cm_changed]
+    cm_near_misses: list[tuple[str, str, float]] = []
+    # The meeting each fold-time near miss came from, index-aligned with
+    # cm_near_misses. They are persisted so the review section keeps pairs
+    # only a fold sees (difflib's ratio is order-sensitive, so the all-pairs
+    # pass in possible_duplicates can miss them) when a run refolds just a
+    # few folders; a changed folder's own pairs are recomputed.
+    cm_nm_meetings: list[str] = []
+    if incremental_cm:
+        for nm in commitments_data.get("near_misses", []):
+            if (isinstance(nm, list) and len(nm) == 4
+                    and isinstance(nm[2], (int, float)) and nm[3] not in cm_changed):
+                cm_near_misses.append((str(nm[0]), str(nm[1]), float(nm[2])))
+                cm_nm_meetings.append(str(nm[3]))
+    # On the full refresh the fold mints provisional ids that restore then
+    # rewrites; defer the per-item lines so the log names the final ids.
+    cm_item_log: list | None = [] if refresh_cm else None
     cm_dropped_before = len(cm_dropped)
+    to_fold = [f for f in dated if f.name not in cm_folded
+               and ((f / "commitments.json").is_file() or (f / "action-items.md").is_file())]
+    cm_done = 0
     for folder in dated:
         cj_path = folder / "commitments.json"
         ai_path = folder / "action-items.md"
@@ -3229,6 +3449,11 @@ def cmd_rollup(args: argparse.Namespace) -> int:
         if folder.name in cm_folded:
             log(f"  {folder.name}: commitments already folded (skipping)")
             continue
+        cm_done += 1
+        nm_start = len(cm_near_misses)
+        if cm_done % CM_PROGRESS_EVERY == 0 or (cm_done == len(to_fold)
+                                                 and len(to_fold) > CM_PROGRESS_EVERY):
+            log(f"folded {cm_done}/{len(to_fold)} commitment folder(s)")
         if cj_path.is_file():
             try:
                 cj_data = json.loads(cj_path.read_text())
@@ -3239,7 +3464,7 @@ def cmd_rollup(args: argparse.Namespace) -> int:
             log(f"folding {folder.name}/commitments.json ({len(entries)} item(s))")
             fold_commitments(folder.name, entries, cm_items, cm_next_id,
                              args.similarity_threshold, cm_near_misses, matcher, cm_cues,
-                             cm_dropped)
+                             cm_dropped, item_log=cm_item_log)
         # Issue #23: the same corpus also owns the action-items.md
         # commitment bullets the summarizer writes (the grammar graph.py
         # parses). Only bullets whose owner is the meeting's self-roled
@@ -3260,17 +3485,36 @@ def cmd_rollup(args: argparse.Namespace) -> int:
                     log(f"folding {folder.name}/action-items.md "
                         f"({len(rows)} self-owned commitment bullet(s))")
                     fold_action_items(folder.name, rows, cm_items, cm_next_id,
-                                      args.similarity_threshold, cm_near_misses, matcher, roles)
+                                      args.similarity_threshold, cm_near_misses, matcher, roles,
+                                      item_log=cm_item_log)
+        cm_nm_meetings += [folder.name] * (len(cm_near_misses) - nm_start)
         cm_folded.add(folder.name)
     if len(cm_dropped) > cm_dropped_before:
         log(f"dropped {len(cm_dropped) - cm_dropped_before} fragment(s) at fold "
             f"(min_words={cm_cues['min_words']}); listed under 'Dropped fragments (review)' "
             f"in {cm_out.name}")
+    if incremental_cm:
+        # Ids never move here: matched items keep theirs, new ones minted
+        # from the persisted next_id. Re-derive every item whose evidence
+        # changed (lost or gained a refolded meeting), then drop uncurated
+        # items left with nothing, after the fold so an unchanged line
+        # re-matches its old item instead of minting a new id.
+        propagate_merged_occurrences(cm_items)
+        lookup = _CmSourceLookup(ws)
+        for it in cm_items:
+            if id(it) in cm_lost or any(o.meeting in cm_changed for o in it.occurrences):
+                recompute_commitment_derived(it, cm_cues, lookup)
+        kept = [it for it in cm_items if it.occurrences or commitment_is_curated(it, cm_items)]
+        for it in cm_items:
+            if it not in kept:
+                log(f"  - {it.id} dropped (no occurrence left after refold): {it.text}")
+        cm_items = kept
     if refresh_cm:
         # The fold minted fresh ids and recorded near misses under them;
         # restore maps items back to their stable ids, so rewrite the near
         # misses too or the review section names ids that no longer exist.
         old_next_id = int(commitments_data.get("next_id", 1))
+        old_ids = {it.id for it in previous_cm_items}
         renamed = restore_commitment_edits(cm_items, previous_cm_items, old_next_id)
         cm_near_misses = [(renamed.get(a, a), renamed.get(b, b), r)
                           for a, b, r in cm_near_misses]
@@ -3280,10 +3524,17 @@ def cmd_rollup(args: argparse.Namespace) -> int:
         live = [int(it.id.split("-")[1]) for it in cm_items
                 if it.id.startswith("CM-") and it.id.split("-")[1].isdigit()]
         cm_next_id[0] = max(old_next_id, max(live, default=0) + 1)
+        # Issue #98: per-item lines carry the final ids. An item that got
+        # its old id back is not new, so it logs as kept.
+        for it, kind, rest in cm_item_log or []:
+            if kind == "+" and it.id in old_ids:
+                kind, rest = "=", rest.replace("(new", "(kept", 1)
+            log(f"  {kind} {it.id} {rest}")
     for it in cm_items:
         if not it.source_values:
             it.source_values = {k: getattr(it, k) for k in CM_CURATED_FIELDS}
     cm_dupes = possible_duplicates(cm_items, cm_near_misses, args.similarity_threshold)
+    cm_live_ids = {it.id for it in cm_items}
     cm_md = render_commitments_md(ws, cm_items, cm_dupes, cm_dropped)
     for it in cm_items:
         it.md_status, it.md_text = it.status, it.text
@@ -3295,6 +3546,9 @@ def cmd_rollup(args: argparse.Namespace) -> int:
         "similarity_threshold": args.similarity_threshold,
         "folded_meetings": sorted(cm_folded),
         "source_fingerprints": fingerprints,
+        "cues_fingerprint": cues_fp,
+        "near_misses": [[a, b, r, m] for (a, b, r), m in zip(cm_near_misses, cm_nm_meetings)
+                        if a in cm_live_ids and b in cm_live_ids],
         "items": [
             {
                 "id": it.id, "text": it.text, "speaker": it.speaker,

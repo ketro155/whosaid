@@ -237,6 +237,12 @@ whosaid roll-up ./meetings --action-items
   the filter (or by a hook) never put "I'll do that" into the corpus: skipped entries are
   listed under _Dropped fragments (review)_ and kept in `_commitments.json` as `dropped`;
   `CM` items already in the corpus are never touched.
+  Roll-up refolds only the meetings whose commitment inputs changed (`commitments.json`,
+  `action-items.md`, `*.speakers.txt`, roles) or that are new or gone, so a small Teams delta
+  takes seconds; it logs `refolding N changed commitment folder(s): ...` and, on a long fold,
+  `folded N/M commitment folder(s)` every 25 folders. Ids and hand edits stay put, and the
+  fields a removed line contributed (cue, boss priority, requester) are re-derived from what
+  is left. A `[commitments]` change in `whosaid.toml` still refolds every meeting.
 - **Personal worklist** `_WORKLIST-<Owner>.md`: whenever a commitments corpus or owner-attributed
   action items exist, roll-up also writes the owner's open items ranked into P1/P2/P3 (see
   [Dev-commitments](#dev-commitments)). The owner is `--owner NAME`, else the `self`-roled
@@ -1062,8 +1068,10 @@ transcript prose and transcript-only labels, updates speaker role headers and ca
 regenerates heuristic commitments. Conflicting edits to a meeting's commitments are reported
 before meeting files are written; reconcile those edits before retrying. Corpus curation,
 including edited commitment text and statuses, survives source refresh. Roll-up fingerprints
-commitment inputs and roles so previously folded meetings are reconsidered when those inputs
-change. Run backfill after changing registry roles to update the per-meeting inputs as well.
+each meeting's commitment inputs and roles and refolds only the meetings whose fingerprint
+changed (or that are new or gone), keeping ids and curation; a `[commitments]` change in
+`whosaid.toml` refolds every meeting. Run backfill after changing registry roles to update the
+per-meeting inputs as well.
 
 **Back up or move the registry.** Both commands respect `WHOSAID_SPEAKER_DB` and work without
 loading a model:
@@ -1403,6 +1411,10 @@ placeholder speakers and `--no-embed` so Ollama is never contacted:
   warned about when the chat count changes, and restored at the end (#57).
 - `python3 test/teams_manifest_test.py` covers audio-less folders in the roll-up and graph:
   `created` from the sidecar, the `kind` field, and `meetings --kind`.
+- `python3 test/rollup_incremental_test.py` covers the incremental commitments refold (#98):
+  only changed, new or removed folders refold, ids and curation hold, stripped cues and boss
+  priority are re-derived, a `[commitments]` change keeps the full refresh with final-id
+  logging, and fold-time review pairs survive.
 - `python3 test/action_items_test.py` covers the built-in summarizer with a fake model:
   candidate selection, quote verification, section assignment, and the evidence block.
 - `python3 test/eval_test.py` covers the action-item eval harness with fake models: the scorer,

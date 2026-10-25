@@ -199,8 +199,10 @@ def main() -> None:
         check(before["next_id"] == 3, f"cm refresh: initial next_id ({before['next_id']})")
         cm_json("Zaphod", [f"I will {X_TXT.lower()}", f"I will {Y_TXT.lower()}"])
         r = rollup(ws)
-        check(r.returncode == 0 and "replacing derived contributions" in r.stderr + r.stdout,
-              "cm refresh: fingerprint refresh ran")
+        # Issue #98: a source change refolds just the changed folder now
+        # (the full refresh is kept for a [commitments] cues change).
+        check(r.returncode == 0 and "refolding 1 changed commitment folder(s)" in r.stderr + r.stdout,
+              "cm refresh: changed folder refolded")
         after = json.loads((ws / "_commitments.json").read_text())
         check(sorted(i["id"] for i in after["items"]) == ["CM-001", "CM-002"], "cm refresh: ids kept")
         check({i["speaker"] for i in after["items"]} == {"Zaphod"}, "cm refresh: speakers follow")
@@ -253,8 +255,8 @@ def main() -> None:
         cm_at(ws, M1, "Zaphod", M1_CM + [NEW_CM])
         cm_at(ws, M2, "Zaphod", M2_CM)
         r = rollup(ws)
-        check(r.returncode == 0 and "replacing derived contributions" in r.stderr + r.stdout,
-              "cm burn: fingerprint refresh ran")
+        check(r.returncode == 0 and "refolding 2 changed commitment folder(s)" in r.stderr + r.stdout,
+              "cm burn: changed folders refolded")
         after = cm_corpus(ws)
         old_ids = {i["id"] for i in before["items"]}
         new = [i for i in after["items"] if NEW_CM in i["text"]]
