@@ -938,7 +938,7 @@ index` (or the watcher) owns writes, and the tools only read `_search.db`.
 |---|---|
 | `whosaid_search` | Turn-level hits (meeting folder, timestamp, speaker, snippet) for a query in `exact`, `meaning`, or `hybrid` mode, with speaker/meeting filters. |
 | `whosaid_context` | The verbatim turns around one hit, so an agent reads a minute instead of a transcript. |
-| `whosaid_items` | The action-item corpus, filterable by owner, requester, status, and type. |
+| `whosaid_items` | The action-item corpus, filterable by owner, requester, status, and type. Numeric-id order, 50 per page by default (`limit`/`offset`, `total`/`omitted`/`next_offset` in the reply), `compact` for id/text/type/owner/status/occurrences; `index_mtime` flags a rebuilt index between pages (restart at offset 0). |
 | `whosaid_item` | One item with its occurrences and timestamped commitments. |
 | `whosaid_person` | A person's talk share, the commitments they made, and the asks they received. |
 | `whosaid_meetings` | Every meeting folder with coverage figures. |

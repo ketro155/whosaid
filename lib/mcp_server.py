@@ -1133,6 +1133,9 @@ _WORKLIST_COMPACT_KEYS = ("id", "source", "text", "tier", "score", "why")
 # same limit, so the list tools page the same way (newest meetings first).
 _LIST_DEFAULT_LIMIT = 50
 _MEETINGS_COMPACT_KEYS = ("folder", "kind", "created", "minutes")
+# GitHub issue #112: whosaid_items pages the same way; "type" is the issue's "kind" and
+# "occurrences" (recorded meeting count) is evidence availability (full detail: whosaid_item).
+_ITEMS_COMPACT_KEYS = ("id", "text", "type", "owner", "status", "occurrences")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -1291,9 +1294,16 @@ _DESC_WS_CONTEXT = (
 
 _DESC_WS_ITEMS = (
     "List action items from the workspace's entity graph, filtered by `owner`, `requester`, "
-    "`status` or `type`. Each item carries its id (AI-NNN), text, owner, status, the meetings "
-    "it was raised in and any commitments. Built by `whosaid index`; read-only. Keywords: "
-    "action items, todos, commitments, who owes what, open items, follow-ups."
+    "`status` or `type`. Each item carries its id (AI-NNN), text, owner, status and the "
+    "meetings it was raised in; whosaid_item has the full history. Sorted by numeric id; "
+    "filters apply before paging. A call with neither `limit` nor `offset` returns only the "
+    "first 50, reporting `total`, `omitted` and `next_offset`; pass `offset=next_offset` (and "
+    "optionally `limit`) for the next page. `compact=true` trims each item to id, text, type, "
+    "owner, status and occurrences (the count of meetings with evidence). Paging is over the "
+    "current index snapshot: every response carries `index_mtime`, and if it differs between "
+    "pages the index was rebuilt, so restart from offset 0. Built by `whosaid index`; "
+    "read-only. Keywords: action items, todos, commitments, who owes what, open items, "
+    "follow-ups."
 )
 
 _DESC_WS_ITEM = (
@@ -1477,6 +1487,12 @@ def whosaid_context(
 # ---------------------------------------------------------------------------
 # 9) whosaid_items
 # ---------------------------------------------------------------------------
+def _item_num(item_id) -> int:
+    """Numeric suffix of an AI-NNN id for sorting; ids without digits sort last."""
+    m = re.search(r"(\d+)\s*$", str(item_id or ""))
+    return int(m.group(1)) if m else sys.maxsize
+
+
 @mcp.tool(name="whosaid_items", description=_DESC_WS_ITEMS, annotations=_read_only())
 def whosaid_items(
     owner: Optional[str] = None,
@@ -1484,9 +1500,22 @@ def whosaid_items(
     status: Optional[str] = None,
     type: Optional[str] = None,  # noqa: A002 - the MCP-facing name; mirrors `graph.py items --type`
     workspace: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    compact: bool = False,
 ) -> dict:
-    """Shell `graph.py items <ws> [--owner ..] [--requester ..] [--status ..] [--type ..] --json`."""
+    """Shell `graph.py items <ws> [--owner ..] [--requester ..] [--status ..] [--type ..] --json`
+    and return {"ok", "items": [...], "count", "total", "index_mtime"} paged like
+    whosaid_meetings (GitHub issue #112): filters run in the CLI first, then rows are sorted
+    by (numeric id suffix, id), offset skips and limit caps; with neither, the response
+    self-caps at _LIST_DEFAULT_LIMIT. "omitted"/"next_offset"/"hint" appear while rows remain.
+    "index_mtime" is the search index file's mtime (ISO-8601 UTC, null if absent): offsets are
+    over the current snapshot, so if it differs between pages restart from offset 0.
+    """
     ws, err = _resolve_ws(workspace)
+    if err:
+        return err
+    limit, offset, err = _page_args(limit, offset)
     if err:
         return err
     args = ["items", ws]
@@ -1496,8 +1525,18 @@ def whosaid_items(
     payload, err = _run_ws(GRAPH_PY, args, ws)
     if err:
         return err
-    items = _as_list(payload, "items")
-    return {"ok": True, "workspace": str(ws), "items": items, "count": len(items)}
+    items = [i for i in _as_list(payload, "items") if isinstance(i, dict)]
+    # graph.py orders by id as text (AI-1000 before AI-999); re-sort numerically, id as tie-breaker
+    items.sort(key=lambda i: (_item_num(i.get("id")), str(i.get("id") or "")))
+    try:
+        mtime = datetime.fromtimestamp(wsconfig.search_db(ws).stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        mtime = None
+    out = _paged({"ok": True, "workspace": str(ws), "index_mtime": mtime}, "items", items, limit, offset)
+    if compact:
+        out["items"] = [{k: i.get(k) for k in _ITEMS_COMPACT_KEYS} for i in out["items"]]
+        out["compact"] = True
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1585,6 +1624,7 @@ def _paged(out: dict, key: str, rows: list, limit: Optional[int], offset: int) -
     omitted = total - (offset + len(rows))
     if omitted > 0:
         out["omitted"] = omitted
+        out["next_offset"] = offset + len(rows)
         out["hint"] = f"more remain: pass offset={offset + len(rows)} (or limit) to page"
     return out
 
