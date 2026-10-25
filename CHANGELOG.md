@@ -6,6 +6,34 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-10-25
+
+### Added
+
+- **`whosaid_items` pages (#112).** New `limit`, `offset` and `compact` parameters; a call
+  with neither returns the first 50 items. Replies carry `total`, `omitted` and
+  `next_offset`, plus `index_mtime` so a caller can detect a rebuilt index between pages
+  and restart at offset 0. Items sort by numeric id (AI-1000 after AI-999). Compact rows
+  hold `id`, `text`, `type`, `owner`, `status` and `occurrences`; full detail stays in
+  `whosaid_item`. `whosaid_meetings`, `whosaid_prs` and `whosaid_speakers` replies also
+  gain `next_offset`.
+- **Cached worklist fallback (#113).** The roll-up writes `_WORKLIST-<Owner>.json` (the
+  `worklist --json` payload plus the corpora's sha256 and `generated_at`) next to
+  `_WORKLIST-<Owner>.md`. On a timeout, `whosaid_worklist` attaches it as `cached` with
+  `stale` and `generated_at`; `use_cache=true` returns it without running the ranking.
+  `workspace.py worklist` prints `phase: <name>` lines to stderr.
+
+### Fixed
+
+- **`whosaid_worklist` errors say what actually failed (#113).** It no longer answers every
+  failure with "run whosaid roll-up ... (builds the corpora)". Errors carry a `category`:
+  `missing_corpora` (checked before anything runs; the only case that recommends a
+  roll-up), `timeout` (with `elapsed_s`, the `phase` the worklist was in, and a
+  phase-specific hint), `exit_<code>`, `bad_json`, `no_cache`.
+- **The worklist ranking loop is much faster, with byte-identical output (#113).** Synthetic
+  400 commitments x 2000 action items: 19 s to 1.6 s difflib-only, 36 s to 15 s with live
+  embeddings.
+
 ## [1.15.2] - 2026-10-24
 
 ### Fixed
