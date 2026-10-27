@@ -188,7 +188,7 @@ assert_eq "$OUT" "$EXPECT_SHA" "hash equals shasum -a 256"
 # 3. action-items: skeleton without a hook (exit 0, speakers listed);
 #    hook plumbing (markdown from the hook's stdout lands in --md-out,
 #    --json-out parses with source=hook, transcript on stdin, env vars);
-#    failing hook (exit 7) degrades to the skeleton and still exits 0.
+#    failing hook (exit 7) fails without writing a placeholder summary.
 # ---------------------------------------------------------------------------
 echo "-- action-items --"
 
@@ -249,7 +249,7 @@ PY
 )" || fail "hook --json-out failed python3 json.load checks"
 assert_eq "$HOOKCHECK" "ok" "hook --json-out parses (json.load) with source=hook and parsed items"
 
-# Failing hook: exits 7 with stderr noise -> skeleton markdown, exit 0.
+# Failing hook: exits 7 with stderr noise -> nonzero, no published summary.
 HOOK7="$TMP/hook7.sh"
 printf '#!/bin/bash\necho "summarizer exploded" >&2\nexit 7\n' > "$HOOK7"
 chmod +x "$HOOK7"
@@ -260,8 +260,8 @@ assert_text "hook exited 7" "$ERR" "failing hook is reported on stderr"
 PASS=$((PASS + 1))
 
 # --engine (issue #14): the default (auto) keeps the hook/skeleton behaviour
-# above; explicit engines are honoured; every failure degrades to the
-# skeleton with exit 0. Ollama is unreachable here (WHOSAID_OLLAMA above).
+# above; explicit engines are honoured and failures return nonzero.
+# Ollama is unreachable here (WHOSAID_OLLAMA above).
 echo "-- action-items --engine --"
 
 run_ws action-items --transcript "$TR" --md-out "$TMP/ai/auto.md"

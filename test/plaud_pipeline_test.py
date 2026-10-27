@@ -106,4 +106,17 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue(audit['verification']['valid'])
 
 
+class LegacyFailureTest(unittest.TestCase):
+    def test_failed_requested_hook_keeps_last_good_summary(self):
+        lib=Path(__file__).resolve().parents[1]/'lib/workspace.py'
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); transcript=root/'transcript.speakers.txt'; output=root/'summary.md'
+            transcript.write_text('[00:00:01] Fixture Person: A real decision.\n')
+            output.write_text('Last good summary.\n')
+            run=subprocess.run([sys.executable,str(lib),'action-items','--transcript',str(transcript),
+                                '--engine','hook','--hook','exit 7','--md-out',str(output)],capture_output=True)
+            self.assertEqual(run.returncode,1)
+            self.assertEqual(output.read_text(),'Last good summary.\n')
+
+
 if __name__=='__main__': unittest.main()
