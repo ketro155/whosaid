@@ -12,6 +12,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 class PlaudError(RuntimeError):
@@ -135,11 +137,14 @@ class Plaud4Client(PlaudClient):
     Session JSON belongs outside the repository, mode 0600. Only the auth
     refresh endpoint uses POST; no recording or vendor-generated note is edited.
     """
-    def __init__(self, session_file: Path, domain: str = "https://api.plaud.ai"):
+    def __init__(self, session_file: Path, domain: str = "https://api.plaud.ai", *, since: str | None = None,
+                 timezone: str = "America/New_York"):
         self.session_file = session_file.expanduser()
         if self.session_file.stat().st_mode & 0o077:
             raise PlaudError("Plaud session file must be private (chmod 600)")
         self.session = json.loads(self.session_file.read_text())
+        self.since_ms = (int(datetime.fromisoformat(since).replace(tzinfo=ZoneInfo(timezone)).timestamp() * 1000)
+                         if since else None)
         if not all(self.session.get(k) for k in ("token", "workspace_id")):
             raise PlaudError("Plaud 4.0 session lacks its workspace token")
         super().__init__(self.session["token"], domain)
@@ -190,35 +195,31 @@ class Plaud4Client(PlaudClient):
         return data.get("data")
 
     def list_files(self):
-        queue, visited, files = ["root"], set(), {}
-        while queue:
-            folder = queue.pop(0)
-            if folder in visited:
-                continue
-            visited.add(folder)
-            cursor, seen_cursors = None, set()
-            while True:
-                query = {"node_id": folder, "page_size": 300}
-                if cursor:
-                    query["cursor"] = cursor
-                data = self.get("/file-app/v4/folders/children?" + urllib.parse.urlencode(query))
-                if not isinstance(data, dict) or not isinstance(data.get("items"), list):
-                    raise PlaudError("Unexpected Plaud 4.0 folder-list schema")
-                for item in data["items"]:
-                    if item.get("file_id"):
-                        files[item["file_id"]] = {**item, "id": item["file_id"],
-                                                  "start_time": item.get("created_at_show_ms")}
-                    elif item.get("node_id") and item.get("system_folder_type") != 2:
-                        queue.append(item["node_id"])
-                cursor = data.get("next_cursor")
-                if not cursor:
-                    break
-                if cursor in seen_cursors:
-                    raise PlaudError("Plaud repeated a pagination cursor; intake incomplete")
-                seen_cursors.add(cursor)
-            if len(files) > 20000 or len(visited) > 2000:
-                raise PlaudError("Plaud traversal limit exceeded; intake incomplete")
-        return list(files.values())
+        # The agenda uses this recording index. Walking the Library tree visits
+        # each meeting's audio/notes folder and is both slow and semantically
+        # wrong for raw intake. Apply the date bound server-side and page fully.
+        files, seen_cursors, cursor = {}, set(), None
+        for _ in range(100):
+            query = {"page_size": 200, "sort_by": "created", "sort_order": "asc"}
+            if self.since_ms is not None:
+                query["date_from"] = self.since_ms
+            if cursor:
+                query["cursor"] = cursor
+            data = self.get("/file-app/v4/recordings/all?" + urllib.parse.urlencode(query))
+            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                raise PlaudError("Unexpected Plaud 4.0 recording-list schema")
+            for item in data["items"]:
+                if not isinstance(item, dict) or not item.get("file_id"):
+                    raise PlaudError("Plaud recording index item lacks a file id")
+                files[item["file_id"]] = {**item, "id": item["file_id"],
+                                          "start_time": item.get("created_at_show_ms")}
+            cursor = data.get("next_cursor")
+            if not cursor:
+                return list(files.values())
+            if cursor in seen_cursors:
+                raise PlaudError("Plaud repeated a pagination cursor; intake incomplete")
+            seen_cursors.add(cursor)
+        raise PlaudError("Plaud recording pagination limit exceeded; intake incomplete")
 
     def detail(self, file_id):
         data = self.get("/file-app/v4/files/detail/" + urllib.parse.quote(file_id, safe=""))

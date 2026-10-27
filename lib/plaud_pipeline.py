@@ -20,6 +20,7 @@ import tomllib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from openbrain_summary import SummaryError, atomic_write, summarize
 from plaud_client import PlaudClient, Plaud4Client, PlaudError, token_from_config
@@ -116,7 +117,8 @@ def process_record(db, row, record, workspace, client, cfg, *, speech=transcribe
             raise PlaudError("Downloaded file is not decodable audio")
         metadata = {"source": "plaud", "file_id": row["id"], "title": detail.get("filename") or
                     detail.get("name") or record.get("filename") or record.get("name") or row["id"],
-                    "date": recording_date(record).isoformat(), "audio_sha256": digest}
+                    "date": recording_date(record).astimezone(ZoneInfo(cfg.get("plaud", {}).get("timezone", "America/New_York"))).isoformat(),
+                    "audio_sha256": digest}
         atomic_write(folder / "metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2))
         checkpoint("downloaded", sha256=digest)
     else:
@@ -159,12 +161,14 @@ def sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=
     with locked(workspace), database(workspace) as db:
         if client is None:
             pcfg = cfg["plaud"]
-            client = (Plaud4Client(Path(pcfg["session_file"]), pcfg.get("domain", "https://api.plaud.ai"))
+            client = (Plaud4Client(Path(pcfg["session_file"]), pcfg.get("domain", "https://api.plaud.ai"),
+                                  since=cutoff, timezone=pcfg.get("timezone", "America/New_York"))
                       if pcfg.get("session_file") else
                       PlaudClient(token_from_config(pcfg), pcfg.get("domain", "https://api.plaud.ai")))
         records = client.list_files()
         # No moving watermark: retries and delayed uploads are re-discovered by stable id.
-        selected = sorted((r for r in records if recording_date(r).date().isoformat() >= cutoff),
+        zone = ZoneInfo(cfg.get("plaud", {}).get("timezone", "America/New_York"))
+        selected = sorted((r for r in records if recording_date(r).astimezone(zone).date().isoformat() >= cutoff),
                           key=lambda r: (recording_date(r), str(r.get("id", r.get("file_id", "")))))
         allow = cfg.get("plaud", {}).get("file_ids")
         if allow is not None:
@@ -175,7 +179,7 @@ def sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=
             file_id = record.get("id") or record.get("file_id")
             if not isinstance(file_id, str) or not file_id:
                 raise PlaudError("Plaud recording has no stable id")
-            folder = recording_date(record).strftime("%Y-%m-%d") + "-" + hashlib.sha256(file_id.encode()).hexdigest()[:24]
+            folder = recording_date(record).astimezone(zone).strftime("%Y-%m-%d") + "-" + hashlib.sha256(file_id.encode()).hexdigest()[:24]
             db.execute("insert or ignore into recordings(id,folder) values (?,?)", (file_id, folder))
             db.commit()
             row = db.execute("select * from recordings where id=?", (file_id,)).fetchone()

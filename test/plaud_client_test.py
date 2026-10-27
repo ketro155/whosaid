@@ -30,9 +30,8 @@ class ClientTest(unittest.TestCase):
         self.client._request=lambda *a,**k:{'status':-420}
         with self.assertRaises(PlaudError):self.client.refresh()
         self.assertEqual(self.path.read_bytes(),old)
-    def test_pages_folders_deduplicate_stable_recording_id(self):
-        replies=[{'items':[{'node_id':'folder','system_folder_type':1}], 'next_cursor':None},
-                 {'items':[{'file_id':'one','created_at_show_ms':1}], 'next_cursor':'next'},
+    def test_pages_recordings_deduplicate_stable_recording_id(self):
+        replies=[{'items':[{'file_id':'one','created_at_show_ms':1}], 'next_cursor':'next'},
                  {'items':[{'file_id':'one','created_at_show_ms':1},{'file_id':'two','created_at_show_ms':2}], 'next_cursor':None}]
         paths=[]
         def get(path):paths.append(path);return replies.pop(0)
