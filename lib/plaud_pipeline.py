@@ -307,10 +307,14 @@ def install(workspace: Path, config: Path, interval: int = 900) -> Path:
     plist = Path.home() / "Library" / "LaunchAgents" / (label + ".plist")
     if plist.exists():
         raise PlaudError("Existing Plaud scheduler found; inspect it before replacing")
+    # SSH and launchd often inherit only system paths. Audio tools installed by
+    # Homebrew and the configured local runtimes must remain discoverable.
+    runtime_path = os.pathsep.join(dict.fromkeys([str(Path.home() / ".local/bin"),
+        "/opt/homebrew/bin", "/usr/local/bin", *os.environ.get("PATH", "/usr/bin:/bin").split(os.pathsep)]))
     data = {"Label": label, "ProgramArguments": [sys.executable, str(LIB / "plaud_pipeline.py"), "sync",
             "--workspace", str(workspace.resolve()), "--config", str(config.resolve())],
             "StartInterval": interval, "RunAtLoad": True, "ProcessType": "Background",
-            "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "EnvironmentVariables": {"PATH": runtime_path,
                                      "HOME": str(Path.home())},
             "StandardOutPath": str(workspace / "intake.log"), "StandardErrorPath": str(workspace / "intake-error.log")}
     plist.parent.mkdir(parents=True, exist_ok=True)
