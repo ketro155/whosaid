@@ -687,6 +687,11 @@ def cmd_action_items(args: argparse.Namespace) -> int:
         markdown, stats = run_ollama_engine(text, transcript.resolve().parent.name, cfg)
         if markdown:
             source = f"ollama:{stats.get('model', '')}"
+    if not markdown and engine != "none":
+        # A requested engine failed. Preserve any last good summary and make
+        # the failure visible to ingest/watch instead of committing a skeleton.
+        log(f"ERROR action-items engine {engine} failed; previous output preserved")
+        return 1
     if not markdown:
         markdown = skeleton_markdown(transcript, speakers)
 

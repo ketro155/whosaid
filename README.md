@@ -1,5 +1,7 @@
 # whosaid
 
+For automatic Plaud 4.0 audio intake and OpenBrain Capture summaries through a ChatGPT-signed-in Codex CLI, see [Plaud and OpenBrain setup](docs/plaud-openbrain.md).
+
 <!-- mcp-name: io.github.sblattj/whosaid -->
 
 Local, speaker-attributed transcription for Apple Silicon — who said what, on your Mac, nothing

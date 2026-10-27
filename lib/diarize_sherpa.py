@@ -1169,19 +1169,26 @@ def build_turns(segs: list, whisper_json: str | None) -> list:
                 overlaps[s["speaker"]] = overlaps.get(s["speaker"], 0.0) + ov
         if overlaps:
             return max(overlaps, key=overlaps.get)
-        mid = (a + b) / 2  # no overlap (silence-gap segment): nearest turn wins
-        nearest = min(segs, key=lambda s: min(abs(mid - s["start"]), abs(mid - s["end"])))
-        return nearest["speaker"]
+        # Silence and missing diarization are not evidence of an identity.
+        return "UNASSIGNED"
 
     for w in wj.get("segments", []):
         txt = (w.get("text") or "").strip()
         if not txt:
             continue
-        sp = speaker_for(w["start"], w["end"])
-        if turns and turns[-1][0] == sp:
-            turns[-1][2].append(txt)
-        else:
-            turns.append((sp, w["start"], [txt]))
+        words = w.get("words")
+        # MLX supplies aligned words. Assigning the whole Whisper segment loses
+        # changes of speaker inside it (particularly greetings/backchannels).
+        units = words if words else [{"start": w["start"], "end": w["end"], "word": txt}]
+        for unit in units:
+            text = unit.get("word", "")
+            if not text.strip():
+                continue
+            sp = speaker_for(float(unit["start"]), float(unit["end"]))
+            if turns and turns[-1][0] == sp:
+                turns[-1][2].append(text)
+            else:
+                turns.append((sp, float(unit["start"]), [text]))
     return turns
 
 
@@ -1224,7 +1231,8 @@ def render_outputs(outdir: Path, base: str, segs: list, speakers: list, names: d
                     f.write(f"# Role: {nm} = {roles[nm]}\n")
             f.write("\n")
             for sp, start, texts in turns:
-                f.write(f"[{hms(start)}] {names[sp]}: {' '.join(texts)}\n\n")
+                label = "UNASSIGNED" if sp in hidden else names.get(sp, sp)
+                f.write(f"[{hms(start)}] {label}: {' '.join(texts)}\n\n")
         log(f"wrote {out_path} ({len(turns)} speaker turns)")
 
     if snippets_n <= 0:
@@ -1246,7 +1254,7 @@ def render_outputs(outdir: Path, base: str, segs: list, speakers: list, names: d
     snippets = {fn: [] for fn in groups}
     for sp, start, texts in turns:
         joined = " ".join(texts).strip()
-        if len(joined.split()) >= 4 and sp not in hidden:  # skip "yeah", "mm-hm" backchannel
+        if len(joined.split()) >= 4 and sp not in hidden and sp in names:  # skip unassigned text
             snippets[final_name(sp)].append((start, joined))
     cards_path = outdir / f"{base}.speaker-cards.txt"
     lines = [f"# Speaker cards: {base}",

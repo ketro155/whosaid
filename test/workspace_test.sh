@@ -254,10 +254,10 @@ HOOK7="$TMP/hook7.sh"
 printf '#!/bin/bash\necho "summarizer exploded" >&2\nexit 7\n' > "$HOOK7"
 chmod +x "$HOOK7"
 run_ws action-items --transcript "$TR" --md-out "$TMP/ai/hook7.md" --hook "$HOOK7"
-assert_eq "$RC" 0 "action-items (failing hook) still exits 0"
+assert_eq "$RC" 1 "action-items (failing hook) exits nonzero"
 assert_text "hook exited 7" "$ERR" "failing hook is reported on stderr"
-assert_file "$TMP/ai/hook7.md" "failing hook still writes action-items.md"
-assert_grep "Speakers in this meeting: Alice, Bob" "$TMP/ai/hook7.md" "failing hook degrades to the skeleton"
+[ ! -e "$TMP/ai/hook7.md" ] || fail "failed hook must not write a placeholder summary"
+PASS=$((PASS + 1))
 
 # --engine (issue #14): the default (auto) keeps the hook/skeleton behaviour
 # above; explicit engines are honoured; every failure degrades to the
@@ -281,17 +281,17 @@ assert_text "action items \(hook\)" "$ERR" "--engine hook runs the hook"
 assert_grep "prepare the slide deck" "$TMP/ai/enghook.md" "--engine hook markdown came from the hook"
 
 run_ws action-items --transcript "$TR" --md-out "$TMP/ai/enghook-none.md" --engine hook
-assert_eq "$RC" 0 "action-items --engine hook without a hook exit code"
+assert_eq "$RC" 1 "action-items --engine hook without a hook exit code"
 assert_text "no hook is set" "$ERR" "--engine hook without a hook warns"
-assert_grep "No summarizer hook" "$TMP/ai/enghook-none.md" "--engine hook without a hook degrades to the skeleton"
+[ ! -e "$TMP/ai/enghook-none.md" ] || fail "missing hook must not write a placeholder summary"
+PASS=$((PASS + 1))
 
 run_ws action-items --transcript "$TR" --md-out "$TMP/ai/engollama.md" --json-out "$TMP/ai/engollama.json" --engine ollama
-assert_eq "$RC" 0 "action-items --engine ollama (Ollama down) still exits 0"
+assert_eq "$RC" 1 "action-items --engine ollama (Ollama down) exits nonzero"
 assert_text "engine ollama failed" "$ERR" "--engine ollama failure is reported on stderr"
-assert_grep "No summarizer hook" "$TMP/ai/engollama.md" "--engine ollama failure degrades to the skeleton"
-OLLSRC="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"])' "$TMP/ai/engollama.json")" \
-  || fail "--engine ollama --json-out does not parse as JSON"
-assert_eq "$OLLSRC" "skeleton" "--engine ollama failure reports source=skeleton in --json-out"
+[ ! -e "$TMP/ai/engollama.md" ] || fail "failed Ollama must not write a placeholder summary"
+[ ! -e "$TMP/ai/engollama.json" ] || fail "failed Ollama must not report a successful JSON artifact"
+PASS=$((PASS + 2))
 
 WHOSAID_ACTION_ITEMS_HOOK="$HOOK" run_ws action-items --transcript "$TR" --md-out "$TMP/ai/envhook.md"
 assert_eq "$RC" 0 "action-items with WHOSAID_ACTION_ITEMS_HOOK exit code"
