@@ -269,7 +269,7 @@ def _sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary
                            (attempts, int(attempts >= 2), time.time() + 300, category, file_id))
                 db.commit()
                 result["failed"] += 1
-        if cfg.get("delivery", {}).get("mode") == "prepare":
+        if cfg.get("delivery", {}).get("mode") in ("prepare", "production"):
             from openbrain_delivery import enqueue
             for row in db.execute("select * from recordings where stage='complete'").fetchall():
                 try:
@@ -278,6 +278,17 @@ def _sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary
                     # A verified file changed or its evidence is missing. Never
                     # silently queue it merely because intake was once complete.
                     result["failed"] += 1
+        if cfg.get("delivery", {}).get("mode") == "production":
+            from openbrain_delivery import drain, status as delivery_status
+            try:
+                result["delivery"] = drain(workspace, cfg["delivery"])
+                result["failed"] += result["delivery"]["failed"]
+                result["delivery_pending"] = delivery_status(workspace)["pending"]
+                if result["delivery_pending"]:
+                    result["failed"] += 1
+            except Exception:
+                result["failed"] += 1
+                result["delivery_error"] = "DeliveryError"
         pending = db.execute("select count(*),min(first_seen) from recordings where stage!='complete'").fetchone()
         result["pending"] = pending[0]
         result["oldest_pending_age_seconds"] = round(max(0, time.time() - pending[1])) if pending[1] else 0

@@ -22,7 +22,7 @@ class Rpc:
         self.thoughts = {}; self.requests = {}; self.calls = 0; self.ownership = {}
         self.drop = False; self.fail_lineage = False; self.wrong_readback = False
     def call(self, name, args):
-        if name == 'meeting_ownership':
+        if name in ('meeting_ownership', 'register_meeting_recording'):
             identity=args['recording_id'].removeprefix('of_')
             data=self.ownership.setdefault(identity,{'recording_id':identity,'owner':'whosaid-local','epoch':1,'revision':0,'thought_id':None,'prior_thought_ids':[],'content_sha256':None})
             return {'content':[{'type':'text','text':'```json\n'+json.dumps(data)+'\n```'}]}
@@ -68,6 +68,17 @@ class DeliveryTest(unittest.TestCase):
             (self.folder/name).write_text(data)
     def enqueue(self): return delivery.enqueue(self.root,self.folder)
     def drain(self): return delivery.drain(self.root,self.cfg,rpc=self.rpc)
+    def test_production_date_boundary_and_registration(self):
+        self.enqueue()
+        self.cfg = {'mode':'production','since':'2026-10-28'}
+        self.assertEqual(self.drain()['delivered'],0)
+        self.assertEqual(self.rpc.calls,0)
+        self.cfg['since']='2026-10-27'
+        self.assertEqual(self.drain()['delivered'],1)
+        self.assertEqual(self.drain()['delivered'],0)
+    def test_production_requires_explicit_boundary(self):
+        self.cfg={'mode':'production'}
+        with self.assertRaises(delivery.DeliveryError):self.drain()
     def test_changed_meeting_date_requires_reverification(self):
         meta=json.loads((self.folder/'metadata.json').read_text());meta['date']='2026-10-28T10:00:00-04:00'
         (self.folder/'metadata.json').write_text(json.dumps(meta))

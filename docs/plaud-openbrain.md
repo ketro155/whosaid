@@ -168,3 +168,11 @@ The job writes freshness and recording-local logs, with no notifications. status
 ```
 
 The summaries_dir export contains verified Markdown notes only. Audio, voiceprints, logs, and rejected drafts stay outside the vault. Existing OpenBrain production ingestion is not rewritten or retired by installing this independent processing job.
+
+## Production date policy
+
+The approved production scope is recordings dated October 27, 2026 onward in America/New_York. The server owns this rule. Both producers register the vendor event timestamp before capture; registration cannot choose an owner or override an explicit assignment. Conflicting recording dates fail closed. Older recordings remain native-owned. Queued legacy native writes are checked against the same date policy inside atomic capture.
+
+Production configuration uses `[delivery] mode = "production"`, `since = "2026-10-27"`, the production MCP URL and an explicit OAuth token command. Each scheduled sync prepares verified notes, sends the outbox and records pending delivery in freshness; pending delivery fails status. Production delivery checks the same local date boundary before registering a recording. The intake uses official MCP transport. A private confidential machine OAuth client supplies access tokens; its credential is stored outside the checkout with mode 0600. No database service-role credential is installed on the processing Mac.
+
+To stop publication, unload the Studio launch agent. Preserve ownership and receipts: stopping local processing never silently transfers a meeting back to native. The last verified note remains available. Historical versions stay visible with supersession and current-head pointers.

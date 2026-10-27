@@ -192,9 +192,17 @@ class HttpMcp:
 
 
 def drain(workspace, cfg, *, rpc=None):
-    if cfg.get("mode") != "pilot" or not cfg.get("file_ids"):
-        raise DeliveryError("Sending requires pilot mode and an explicit recording allowlist")
-    allowed = set(cfg["file_ids"])
+    production = cfg.get("mode") == "production"
+    if production:
+        since = cfg.get("since")
+        if not isinstance(since, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+            raise DeliveryError("Production delivery requires an explicit recording-date boundary")
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(cfg.get("timezone", "America/New_York"))
+        datetime.fromisoformat(since)
+    elif cfg.get("mode") != "pilot" or not cfg.get("file_ids"):
+        raise DeliveryError("Sending requires pilot allowlist or explicit production date boundary")
+    allowed = set(cfg.get("file_ids", []))
     rpc = rpc or HttpMcp(cfg)
     result = {"delivered": 0, "failed": 0}
     # This lock serializes delivery across every process, including ambiguous
@@ -204,11 +212,20 @@ def drain(workspace, cfg, *, rpc=None):
     with locked(lock_dir), connect(workspace) as db:
         rows = db.execute("select * from outbox where status!='delivered' order by created_at,revision").fetchall()
         for row in rows:
-            if row["meeting_id"] not in allowed:
+            if not production and row["meeting_id"] not in allowed:
                 continue
             try:
                 if row["verification_binding"] != hashlib.sha256(row["content"].encode()).hexdigest():
                     raise DeliveryError("Queued summary lacks a current verification binding; re-verify and prepare it")
+                if production:
+                    metadata = json.loads(row["content"].split("\n", 2)[1])
+                    recorded = datetime.fromisoformat(metadata["date"])
+                    if recorded.tzinfo is None:
+                        raise DeliveryError("Recording date must include timezone")
+                    if recorded.astimezone(zone).date().isoformat() < since:
+                        continue
+                    ownership_json(rpc.call("register_meeting_recording", {
+                        "recording_id": row["meeting_id"], "recorded_at": metadata["date"]}), row["meeting_id"])
                 ownership = ownership_json(rpc.call("meeting_ownership", {"recording_id": row["meeting_id"]}), row["meeting_id"])
                 parent = db.execute("select * from outbox where event_id=?", (row["parent"],)).fetchone() if row["parent"] else None
                 if parent and parent["status"] != "delivered":
