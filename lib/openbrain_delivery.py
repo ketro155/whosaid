@@ -119,6 +119,26 @@ def context_json(result):
     raise DeliveryError("OpenBrain returned no verifiable context receipt")
 
 
+def ownership_json(result, meeting):
+    if not isinstance(result, dict) or result.get("isError"):
+        raise DeliveryError("Meeting ownership lookup failed; no capture attempted")
+    for block in result.get("content", []):
+        match = re.fullmatch(r"```json\s*\n(.*?)\n```\s*", block.get("text", ""), re.S)
+        if not match:
+            continue
+        data = json.loads(match[1])
+        if (data.get("recording_id") != meeting.removeprefix("of_") or
+                data.get("owner") != "whosaid-local" or data.get("epoch", 0) <= 0 or
+                any(type(data.get(k)) is not int or data[k] < 0 for k in ("epoch", "revision")) or
+                not isinstance(data.get("prior_thought_ids"), list) or
+                any(not isinstance(x, str) or not re.fullmatch(UUID, x) for x in data["prior_thought_ids"]) or
+                not (data.get("thought_id") is None or isinstance(data["thought_id"], str) and re.fullmatch(UUID, data["thought_id"])) or
+                not (data.get("content_sha256") is None or isinstance(data["content_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", data["content_sha256"]))):
+            raise DeliveryError("Local ownership unconfirmed; no capture attempted")
+        return data
+    raise DeliveryError("No structured meeting ownership receipt")
+
+
 class HttpMcp:
     def __init__(self, cfg):
         self.url = validate_url(cfg["url"])
@@ -189,6 +209,7 @@ def drain(workspace, cfg, *, rpc=None):
             try:
                 if row["verification_binding"] != hashlib.sha256(row["content"].encode()).hexdigest():
                     raise DeliveryError("Queued summary lacks a current verification binding; re-verify and prepare it")
+                ownership = ownership_json(rpc.call("meeting_ownership", {"recording_id": row["meeting_id"]}), row["meeting_id"])
                 parent = db.execute("select * from outbox where event_id=?", (row["parent"],)).fetchone() if row["parent"] else None
                 if parent and parent["status"] != "delivered":
                     raise DeliveryError("Prior meeting revision has no confirmed receipt")
@@ -196,10 +217,20 @@ def drain(workspace, cfg, *, rpc=None):
                 # exactly the same request so server-side durable dedup applies.
                 if row["request"]:
                     args = json.loads(row["request"])
-                    if args.get("content") != row["content"]:
+                    if args.get("content") != row["content"] or args.get("origin") != "whosaid-local":
                         raise DeliveryError("Frozen delivery request differs from verified content")
                 else:
-                    args = {"content": row["content"], "origin": "whosaid-local-pilot", "type": "observation"}
+                    if parent and ownership["thought_id"] != parent["thought_id"]:
+                        raise DeliveryError("Remote revision differs from local parent; reconcile before correction")
+                    replay = not parent and ownership["revision"] > 0
+                    if replay and ownership["content_sha256"] != row["verification_binding"]:
+                        raise DeliveryError("Existing remote summary requires reconciliation before first local delivery")
+                    revision = ownership["revision"] if replay else ownership["revision"] + 1
+                    args = {"content": row["content"], "origin": "whosaid-local", "type": "observation",
+                            "meeting": {"provider": "plaud", "recording_id": row["meeting_id"].removeprefix("of_"),
+                                        "owner_epoch": ownership["epoch"], "revision": revision, "expected_revision": revision - 1}}
+                    if not parent and ownership["prior_thought_ids"]:
+                        args.update(supersedes=ownership["prior_thought_ids"], supersedes_as="supersedes")
                     if parent:
                         before = context_json(rpc.call("get_context", {"seed_id": parent["thought_id"], "hops": 1, "limit": 1}))
                         if before["canon"].get("is_canon") is not True:
@@ -207,6 +238,12 @@ def drain(workspace, cfg, *, rpc=None):
                         args.update(supersedes=parent["thought_id"], supersedes_as="supersedes")
                     db.execute("update outbox set request=? where event_id=?", (json.dumps(args, sort_keys=True), row["event_id"]))
                     db.commit()
+                contract = args.get("meeting", {})
+                if (contract.get("owner_epoch") != ownership["epoch"] or
+                        type(contract.get("revision")) is not int or
+                        not ownership["revision"] <= contract["revision"] <= ownership["revision"] + 1 or
+                        contract.get("expected_revision") != contract["revision"] - 1):
+                    raise DeliveryError("Frozen request has stale ownership or revision")
                 response = rpc.call("capture_thought", args)
                 if not isinstance(response, dict) or response.get("isError"):
                     raise DeliveryError("Capture rejected; receipt withheld")
@@ -219,9 +256,15 @@ def drain(workspace, cfg, *, rpc=None):
                 if (check["seed"].get("id") != thought or check["seed"].get("content") != args["content"] or
                         check["canon"].get("is_canon") is not True):
                     raise DeliveryError("Captured summary identity/content/currentness readback mismatch")
-                if parent:
-                    old = context_json(rpc.call("get_context", {"seed_id": parent["thought_id"], "hops": 1, "limit": 1}))
-                    if (old["seed"].get("id") != parent["thought_id"] or
+                saved = ownership_json(rpc.call("meeting_ownership", {"recording_id": row["meeting_id"]}), row["meeting_id"])
+                if (saved["epoch"] != contract["owner_epoch"] or saved["revision"] != contract["revision"] or
+                        saved["thought_id"] != thought or saved["content_sha256"] != row["verification_binding"]):
+                    raise DeliveryError("Shared meeting revision receipt mismatch")
+                predecessors = args.get("supersedes", [])
+                if isinstance(predecessors, str): predecessors = [predecessors]
+                for predecessor in predecessors:
+                    old = context_json(rpc.call("get_context", {"seed_id": predecessor, "hops": 1, "limit": 1}))
+                    if (old["seed"].get("id") != predecessor or
                             old["canon"].get("is_canon") is not False or old["canon"].get("current_id") != thought):
                         raise DeliveryError("Correction lineage was not confirmed")
                 db.execute("update outbox set status='delivered',thought_id=?,error=null,delivered_at=? where event_id=?",

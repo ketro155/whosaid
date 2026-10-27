@@ -19,17 +19,26 @@ import speaker_acceptance as speakers
 
 class Rpc:
     def __init__(self):
-        self.thoughts = {}; self.requests = {}; self.calls = 0
+        self.thoughts = {}; self.requests = {}; self.calls = 0; self.ownership = {}
         self.drop = False; self.fail_lineage = False; self.wrong_readback = False
     def call(self, name, args):
+        if name == 'meeting_ownership':
+            identity=args['recording_id'].removeprefix('of_')
+            data=self.ownership.setdefault(identity,{'recording_id':identity,'owner':'whosaid-local','epoch':1,'revision':0,'thought_id':None,'prior_thought_ids':[],'content_sha256':None})
+            return {'content':[{'type':'text','text':'```json\n'+json.dumps(data)+'\n```'}]}
         if name == 'capture_thought':
             self.calls += 1
             key = json.dumps(args, sort_keys=True)
             if key not in self.requests:
                 identity = str(uuid.uuid4()); self.requests[key] = identity
                 self.thoughts[identity] = {'content': args['content'], 'current': identity}
-                if args.get('supersedes') and not self.fail_lineage:
-                    self.thoughts[args['supersedes']]['current'] = identity
+                before=args.get('supersedes',[])
+                if isinstance(before,str):before=[before]
+                if not self.fail_lineage:
+                    for previous in before:self.thoughts[previous]['current']=identity
+                contract=args['meeting'];self.ownership[contract['recording_id']].update(
+                    revision=contract['revision'],thought_id=identity,prior_thought_ids=[],
+                    content_sha256=hashlib.sha256(args['content'].encode()).hexdigest())
             if self.drop:
                 self.drop = False
                 raise TimeoutError('lost response after remote commit')

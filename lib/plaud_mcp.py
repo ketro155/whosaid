@@ -150,6 +150,35 @@ class PlaudMcpClient:
             raise PlaudError("Official file response does not match the requested identity")
         return data
 
+    def transcript(self, file_id):
+        """Read the raw transcript completely; never substitute polished notes."""
+        segments, cursor, seen = [], None, set()
+        total = None
+        for _ in range(int(self.cfg.get("max_pages", 1000))):
+            args = {"file_id": file_id, "block": "transaction", "limit": 100}
+            if cursor:
+                args["cursor"] = cursor
+            data = self.rpc.call("get_transcript", args)
+            if (not isinstance(data, dict) or str(data.get("file_id", "")).removeprefix("of_") != file_id.removeprefix("of_") or
+                    data.get("block") != "transaction" or not isinstance(data.get("segments"), list) or
+                    type(data.get("total")) is not int or data["total"] < 0):
+                raise PlaudError("Unexpected official raw transcript schema")
+            if total is not None and data["total"] != total:
+                raise PlaudError("Plaud transcript changed during pagination; retry the complete read")
+            total = data["total"]
+            if data.get("offset") != len(segments) or data.get("returned") != len(data["segments"]):
+                raise PlaudError("Plaud transcript page offset/count mismatch")
+            segments.extend(data["segments"])
+            cursor = data.get("next_cursor")
+            if not cursor:
+                if len(segments) != total:
+                    raise PlaudError("Plaud transcript read incomplete")
+                return {"file_id": file_id, "block": "transaction", "segments": segments}
+            if not isinstance(cursor, str) or cursor in seen or not data["segments"]:
+                raise PlaudError("Plaud transcript cursor did not advance")
+            seen.add(cursor)
+        raise PlaudError("Plaud transcript page bound reached")
+
     def close(self):
         close = getattr(self.rpc, "close", None)
         if close:
