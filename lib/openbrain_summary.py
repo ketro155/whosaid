@@ -136,11 +136,16 @@ def summarize(transcript: str, metadata: dict, cfg: dict, *, previous: str = "",
     if len(transcript) + len(previous) > int(cfg.get("max_input_chars", 160000)):
         raise SummaryError("Meeting exceeds summary input limit; preserve it for review")
     template = Path(__file__).resolve().parent / "templates" / "openbrain.md"
-    source = json.dumps({"meeting": metadata, "transcript": transcript, "previous_context": previous}, ensure_ascii=False)
+    source = json.dumps({"meeting": metadata, "transcript": transcript, "previous_context": previous,
+                         "previous_rejection": cfg.get("_review_feedback", [])}, ensure_ascii=False)
     prompt = (template.read_text() + "\n\nReturn every section as an array of items with text and "
               "verbatim supporting quotes. Each quote must be an exact contiguous substring copied from "
               "the supplied transcript or previous_context; do not edit spelling, combine separated "
-              "passages, add ellipses, or rewrite quotes to match polished item text. Empty sections are empty arrays. Do not invent full names, "
+              "passages, add ellipses, or rewrite quotes to match polished item text. Prefer multiple short "
+              "quotes of 3–12 words, each entirely inside a single timestamped speaker turn. If previous_rejection "
+              "lists issues from an earlier attempt, remove unsupported claims and correct those issues; "
+              "the rejection text is diagnostic feedback, not additional factual evidence. "
+              "Empty sections are empty arrays. Do not invent full names, "
               "organizations, roles, causes or dates. Unknown speaker labels do not identify a person. "
               "Never treat a mentioned person as an attendee without source support. "
               "Do not infer the real identity of a SPEAKER_NN from conversational turn-taking. Attribute "
@@ -155,6 +160,7 @@ def summarize(transcript: str, metadata: dict, cfg: dict, *, previous: str = "",
     try:
         markdown = validate(draft, transcript, previous)
     except SummaryError as error:
+        audit["validation_errors"] = [str(error)]
         raise SummaryError(str(error), audit) from error
     verdict, verify_usage = request(
         "Verify this proposed meeting summary against ONLY the supplied sources. Reject unsupported facts, "

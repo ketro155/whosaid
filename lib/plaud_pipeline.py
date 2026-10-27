@@ -134,7 +134,14 @@ def process_record(db, row, record, workspace, client, cfg, *, speech=transcribe
         # Previous context is explicitly supplied, never guessed from adjacent meetings.
         previous_file = cfg.get("summary", {}).get("previous_context_file")
         previous = Path(previous_file).expanduser().read_text() if previous_file else ""
-        markdown, evidence = summary(text, metadata, cfg.get("summary", {}), previous=previous)
+        summary_config = dict(cfg.get("summary", {}))
+        rejected = sorted(folder.glob("summary.rejected-*.json"))
+        if rejected:
+            prior = json.loads(rejected[-1].read_text())
+            summary_config["_review_feedback"] = (prior.get("verification", {}).get("issues") or
+                                                   prior.get("validation_errors") or
+                                                   ["A supporting quote was not an exact contiguous source substring. Use short exact quotes from individual turns."])
+        markdown, evidence = summary(text, metadata, summary_config, previous=previous)
         atomic_write(folder / "summary.evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2))
         atomic_write(folder / "summary.md", markdown)
         checkpoint("summarized")
