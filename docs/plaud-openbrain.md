@@ -126,6 +126,22 @@ summaries_dir = "/absolute/path/to/vault/Plaud Local"
 
 Use an explicit since date to prevent accidental corpus backfills. file_ids can optionally restrict a test pass to exact recording IDs. Previous context is optional; the summary must omit unsupported cross-meeting changes rather than guess them. The source template lives at lib/templates/openbrain.md. Supported sections are Summary, Participants, Decisions, Changes Since Last Time, Action Items, Key Numbers & Data, Open Questions, and Risks & Concerns. Empty sections are omitted. Each item retains supporting source quotes in a private evidence JSON file; an independent verification call rejects unsupported claims. Failed drafts remain private diagnostic artifacts and are never exported as finished notes.
 
+### Automatic claim correction
+
+Verification identifies each unsupported item's exact section and zero-based array index, with a specific reason. The application permits the repair model to rewrite or remove only those flagged items; supported, unflagged items retain their content and order. Repairs can correct citations, remove an invented rationale/program attribution, or preserve a stated figure with its measure explicitly unidentified. Every candidate must satisfy the template/evidence structure and pass a fresh verification of the entire summary before publication.
+
+By default, two targeted correction rounds are allowed. If claims remain unsupported, the application removes only the items explicitly flagged by the latest review and verifies the remainder once more. It never publishes an empty core Summary, an unverified remainder, an edit outside the flagged set, or malformed verifier/repair output. The last good note stays in place if the bounded workflow cannot finish successfully.
+
+```toml
+[summary]
+repair_rounds = 2
+max_summary_seconds = 600
+```
+
+`repair_rounds` accepts 0–3. A fresh accepted draft uses two provider requests. The default repair path uses at most seven: draft, up to four whole-summary reviews and up to two repairs. Three configured repair rounds allow at most nine requests. A matching retained draft skips the initial generation request. An absolute deadline bounds both the Codex login-status check and model subprocess, with remaining time recomputed before each. The application also checks the budget before/after every provider request; exhaustion withholds publication.
+
+Retained rejected drafts resume only when transcript hash, template hash, source passages, previous context, prompt policy, meeting date/identity and revision generation match exactly. Successful publication invalidates older rejected drafts; explicit revision increments the generation. Changed input starts a new draft. Delivery requires the exact meeting metadata used during verification; corrected dates require reverification. Legacy queued summaries without this binding cannot send until reverified and prepared again, and frozen outbox content must still match the verified note. Private evidence records the initial draft, each review, every patch/pruned item, provider usage and the final verified draft with exact source quotes. This audit is not inserted into the meeting note. Repair is driven by transcript evidence, not by web search or unsupported outside context. Source/model failures can still require review after the bounded attempts; correction does not disable factual verification.
+
 Run one pass using the isolated interpreter:
 
 ```sh

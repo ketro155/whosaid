@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from openbrain_summary import SummaryError, EVIDENCE_FORMAT, atomic_write, summarize
+from openbrain_summary import SummaryError, EVIDENCE_FORMAT, atomic_write, summarize, can_resume
 from plaud_client import PlaudClient, Plaud4Client, PlaudError, token_from_config
 
 LIB = Path(__file__).resolve().parent
@@ -67,6 +67,8 @@ def database(workspace: Path):
         db.execute("alter table recordings add column first_seen real not null default 0")
     if "source_record" not in {r[1] for r in db.execute("pragma table_info(recordings)")}:
         db.execute("alter table recordings add column source_record text")
+    if "summary_generation" not in {r[1] for r in db.execute("pragma table_info(recordings)")}:
+        db.execute("alter table recordings add column summary_generation integer not null default 0")
     db.commit()
     try:
         with db:
@@ -144,12 +146,17 @@ def process_record(db, row, record, workspace, client, cfg, *, speech=transcribe
         previous_file = cfg.get("summary", {}).get("previous_context_file")
         previous = Path(previous_file).expanduser().read_text() if previous_file else ""
         summary_config = dict(cfg.get("summary", {}))
+        summary_config["_summary_generation"] = row["summary_generation"]
         rejected = sorted(folder.glob("summary.rejected-*.json"), key=lambda p: p.stat().st_mtime_ns)
+        published = folder / "summary.evidence.json"
+        rejected = [p for p in rejected if not published.exists() or p.stat().st_mtime_ns > published.stat().st_mtime_ns]
         if rejected:
             prior = json.loads(rejected[-1].read_text())
             summary_config["_review_feedback"] = (prior.get("verification", {}).get("issues") or
                                                    prior.get("validation_errors") or
                                                    []) if prior.get("evidence_format") == EVIDENCE_FORMAT else []
+            if can_resume(prior, text, previous, metadata=metadata, generation=row["summary_generation"]):
+                summary_config["_resume_draft"] = prior["draft"]
         markdown, evidence = summary(text, metadata, summary_config, previous=previous)
         atomic_write(folder / "summary.evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2))
         atomic_write(folder / "summary.md", markdown)
@@ -328,7 +335,7 @@ def main() -> int:
                 if a.command == "revise":
                     if not a.from_stage or row["stage"] != "complete":
                         raise PlaudError("revise needs a completed recording and explicit --from-stage")
-                    db.execute("update recordings set stage=?,completed_at=null where id=?", (a.from_stage, a.file_id))
+                    db.execute("update recordings set stage=?,completed_at=null,summary_generation=summary_generation+1 where id=?", (a.from_stage, a.file_id))
                 elif row["stage"] == "complete":
                     raise PlaudError("Completed recording requires revise, not retry")
                 db.execute("update recordings set attempts=0,quarantined=0,next_attempt=0 where id=?", (a.file_id,))

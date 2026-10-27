@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from openbrain_summary import validate
+from openbrain_summary import validate, verification_metadata
 from plaud_client import NoRedirect, validate_url
 
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -43,6 +43,8 @@ def connect(workspace):
         digest text not null, parent text, content text not null, status text not null default 'pending',
         request text, thought_id text, attempts integer not null default 0, error text,
         created_at text not null, delivered_at text, unique(meeting_id,revision))""")
+    if "verification_binding" not in {r[1] for r in db.execute("pragma table_info(outbox)")}:
+        db.execute("alter table outbox add column verification_binding text")
     db.commit()
     try:
         with db:
@@ -57,6 +59,8 @@ def enqueue(workspace, folder):
     audit = json.loads((folder / "summary.evidence.json").read_text())
     transcript = (folder / "transcript.speakers.txt").read_text()
     markdown = (folder / "summary.md").read_text()
+    if audit.get("verification_metadata") != verification_metadata(meta):
+        raise DeliveryError("Meeting metadata changed or lacks verification; re-verify before delivery")
     if audit.get("verification") != {"valid": True, "issues": []}:
         raise DeliveryError("Delivery requires a verified summary")
     if hashlib.sha256(transcript.encode()).hexdigest() != audit.get("transcript_sha256"):
@@ -77,10 +81,9 @@ def enqueue(workspace, folder):
     with connect(workspace) as db:
         db.execute("begin immediate")
         prior = db.execute("select * from outbox where meeting_id=? order by revision desc limit 1", (meeting,)).fetchone()
-        if prior and prior["digest"] == digest:
-            return prior["event_id"]
-        revision = prior["revision"] + 1 if prior else 1
-        event = f"plaud:{meeting}:{revision}:{digest}"
+        same_revision = prior and prior["digest"] == digest
+        revision = prior["revision"] if same_revision else (prior["revision"] + 1 if prior else 1)
+        event = prior["event_id"] if same_revision else f"plaud:{meeting}:{revision}:{digest}"
         # Keep the content byte-identical across retries. No ingest timestamp,
         # signed URL, audio, transcript body, or local biometric paths.
         content = ("[whosaid-local meeting summary]\n" + json.dumps({"meeting_id": meeting,
@@ -88,9 +91,15 @@ def enqueue(workspace, folder):
             "audio_sha256": meta.get("audio_sha256"), "transcript_sha256": audit["transcript_sha256"],
             "template_sha256": audit.get("template_sha256"), "source": f"mcp://plaud/{meeting}",
             "evidence": "retained in private whosaid workspace"}, sort_keys=True, ensure_ascii=False) + "\n\n" + markdown)
-        db.execute("insert into outbox(event_id,meeting_id,revision,digest,parent,content,created_at) values(?,?,?,?,?,?,?)",
+        if same_revision:
+            if prior["content"] != content:
+                raise DeliveryError("Frozen outbox content changed; preserve it for review")
+            db.execute("update outbox set verification_binding=? where event_id=?",
+                       (hashlib.sha256(content.encode()).hexdigest(), event))
+            return event
+        db.execute("insert into outbox(event_id,meeting_id,revision,digest,parent,content,created_at,verification_binding) values(?,?,?,?,?,?,?,?)",
                    (event, meeting, revision, digest, prior["event_id"] if prior else None,
-                    content, datetime.now(timezone.utc).isoformat()))
+                    content, datetime.now(timezone.utc).isoformat(), hashlib.sha256(content.encode()).hexdigest()))
     return event
 
 
@@ -178,6 +187,8 @@ def drain(workspace, cfg, *, rpc=None):
             if row["meeting_id"] not in allowed:
                 continue
             try:
+                if row["verification_binding"] != hashlib.sha256(row["content"].encode()).hexdigest():
+                    raise DeliveryError("Queued summary lacks a current verification binding; re-verify and prepare it")
                 parent = db.execute("select * from outbox where event_id=?", (row["parent"],)).fetchone() if row["parent"] else None
                 if parent and parent["status"] != "delivered":
                     raise DeliveryError("Prior meeting revision has no confirmed receipt")
@@ -185,6 +196,8 @@ def drain(workspace, cfg, *, rpc=None):
                 # exactly the same request so server-side durable dedup applies.
                 if row["request"]:
                     args = json.loads(row["request"])
+                    if args.get("content") != row["content"]:
+                        raise DeliveryError("Frozen delivery request differs from verified content")
                 else:
                     args = {"content": row["content"], "origin": "whosaid-local-pilot", "type": "observation"}
                     if parent:

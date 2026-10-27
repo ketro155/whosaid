@@ -50,7 +50,7 @@ class DeliveryTest(unittest.TestCase):
         transcript = '[00:00:01] Fixture Person: '+text+'\n'
         draft = {'sections': {h: [] for h in summary.HEADINGS}}
         draft['sections']['Summary'] = [{'text': text, 'evidence':[1]}]
-        audit = {'draft':draft,'verification':{'valid':True,'issues':[]},
+        audit = {'verification_metadata':{'file_id':'recording-fixture','date':'2026-10-27T10:00:00-04:00'},'draft':draft,'verification':{'valid':True,'issues':[]},
                  'transcript_sha256':hashlib.sha256(transcript.encode()).hexdigest(),
                  'template_sha256':'fixture','source_passages':summary.passages(transcript)}
         for name, data in {'metadata.json':json.dumps({'file_id':'recording-fixture','date':'2026-10-27T10:00:00-04:00','title':'Fixture'}),
@@ -59,6 +59,24 @@ class DeliveryTest(unittest.TestCase):
             (self.folder/name).write_text(data)
     def enqueue(self): return delivery.enqueue(self.root,self.folder)
     def drain(self): return delivery.drain(self.root,self.cfg,rpc=self.rpc)
+    def test_changed_meeting_date_requires_reverification(self):
+        meta=json.loads((self.folder/'metadata.json').read_text());meta['date']='2026-10-28T10:00:00-04:00'
+        (self.folder/'metadata.json').write_text(json.dumps(meta))
+        with self.assertRaises(delivery.DeliveryError):self.enqueue()
+        self.assertEqual(self.rpc.calls,0)
+    def test_legacy_unbound_pending_row_cannot_send_until_reprepared(self):
+        event=self.enqueue()
+        with delivery.connect(self.root) as db:db.execute('update outbox set verification_binding=null')
+        self.assertEqual(self.drain()['failed'],1)
+        self.assertEqual(self.rpc.calls,0)
+        self.assertEqual(self.enqueue(),event)
+        self.assertEqual(self.drain()['delivered'],1)
+    def test_changed_frozen_content_cannot_send(self):
+        self.enqueue()
+        with delivery.connect(self.root) as db:db.execute("update outbox set content=content||'changed'")
+        self.assertEqual(self.drain()['failed'],1)
+        self.assertEqual(self.rpc.calls,0)
+        with self.assertRaises(delivery.DeliveryError):self.enqueue()
     def test_prepare_and_replay_never_write_remotely(self):
         event = self.enqueue(); self.assertEqual(event,self.enqueue()); self.assertEqual(self.rpc.calls,0)
         self.assertEqual(self.drain()['delivered'],1); self.assertEqual(self.drain()['delivered'],0)
