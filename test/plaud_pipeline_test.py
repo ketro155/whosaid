@@ -108,6 +108,19 @@ class SummaryTest(unittest.TestCase):
 
 
 class LegacyFailureTest(unittest.TestCase):
+    def test_status_fails_when_freshness_is_stale(self):
+        from datetime import datetime,timezone
+        lib=Path(__file__).resolve().parents[1]/'lib/plaud_pipeline.py'
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);fresh=root/'freshness.json'
+            command=[sys.executable,str(lib),'status','--workspace',str(root)]
+            fresh.write_text(json.dumps({'at':datetime.now(timezone.utc).isoformat(),'failed':0,'quarantined':0}))
+            self.assertEqual(subprocess.run(command,capture_output=True).returncode,0)
+            fresh.write_text(json.dumps({'at':'2020-01-01T00:00:00+00:00','failed':0,'quarantined':0}))
+            bad=subprocess.run(command,capture_output=True,text=True)
+            self.assertEqual(bad.returncode,1)
+            self.assertTrue(json.loads(bad.stdout)['stale'])
+
     def test_failed_requested_hook_keeps_last_good_summary(self):
         lib=Path(__file__).resolve().parents[1]/'lib/workspace.py'
         with tempfile.TemporaryDirectory() as td:
