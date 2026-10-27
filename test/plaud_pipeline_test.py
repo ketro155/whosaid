@@ -79,12 +79,13 @@ class PipelineTest(unittest.TestCase):
 class SummaryTest(unittest.TestCase):
     def draft(self):
         data={'sections':{h:[] for h in s.HEADINGS}}
-        data['sections']['Summary']=[{'text':'A fixture meeting discussed a decision.', 'quotes':['Fixture decision.']}]
+        data['sections']['Summary']=[{'text':'A fixture meeting discussed a decision.', 'evidence':[1]}]
         return data
-    def test_evidence_gate_rejects_fabricated_quote(self):
+    def test_evidence_gate_rejects_nonexistent_passage(self):
         data=self.draft()
         self.assertIn('## Summary',s.validate(data,'Fixture decision.'))
-        with self.assertRaises(s.SummaryError): s.validate(data,'Different evidence.')
+        data['sections']['Summary'][0]['evidence']=[999]
+        with self.assertRaises(s.SummaryError): s.validate(data,'Fixture decision.')
     def test_empty_and_wrong_schema_rejected(self):
         with self.assertRaises(s.SummaryError): s.validate({},'Fixture decision.')
         with self.assertRaises(s.SummaryError): s.validate({'sections':{h:[] for h in s.HEADINGS}},'Fixture decision.')

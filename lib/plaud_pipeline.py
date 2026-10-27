@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from openbrain_summary import SummaryError, atomic_write, summarize
+from openbrain_summary import SummaryError, EVIDENCE_FORMAT, atomic_write, summarize
 from plaud_client import PlaudClient, Plaud4Client, PlaudError, token_from_config
 
 LIB = Path(__file__).resolve().parent
@@ -135,12 +135,12 @@ def process_record(db, row, record, workspace, client, cfg, *, speech=transcribe
         previous_file = cfg.get("summary", {}).get("previous_context_file")
         previous = Path(previous_file).expanduser().read_text() if previous_file else ""
         summary_config = dict(cfg.get("summary", {}))
-        rejected = sorted(folder.glob("summary.rejected-*.json"))
+        rejected = sorted(folder.glob("summary.rejected-*.json"), key=lambda p: p.stat().st_mtime_ns)
         if rejected:
             prior = json.loads(rejected[-1].read_text())
             summary_config["_review_feedback"] = (prior.get("verification", {}).get("issues") or
                                                    prior.get("validation_errors") or
-                                                   ["A supporting quote was not an exact contiguous source substring. Use short exact quotes from individual turns."])
+                                                   []) if prior.get("evidence_format") == EVIDENCE_FORMAT else []
         markdown, evidence = summary(text, metadata, summary_config, previous=previous)
         atomic_write(folder / "summary.evidence.json", json.dumps(evidence, ensure_ascii=False, indent=2))
         atomic_write(folder / "summary.md", markdown)
@@ -205,7 +205,7 @@ def sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=
                 current = db.execute("select attempts from recordings where id=?", (file_id,)).fetchone()
                 attempts = current["attempts"] + 1
                 if isinstance(error, SummaryError) and error.audit:
-                    atomic_write(workspace / "meetings" / row["folder"] / f"summary.rejected-{attempts}.json",
+                    atomic_write(workspace / "meetings" / row["folder"] / f"summary.rejected-{time.time_ns()}-{attempts}.json",
                                  json.dumps(error.audit, ensure_ascii=False, indent=2))
                 category = type(error).__name__  # never log provider bodies or signed URLs
                 db.execute("update recordings set attempts=?,quarantined=?,next_attempt=?,error=? where id=?",
