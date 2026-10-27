@@ -55,15 +55,24 @@ def locked(workspace: Path):
         yield
 
 
-def database(workspace: Path) -> sqlite3.Connection:
+@contextmanager
+def database(workspace: Path):
     db = sqlite3.connect(workspace / "plaud.sqlite")
     db.row_factory = sqlite3.Row
     db.execute("""create table if not exists recordings (
         id text primary key, folder text not null, stage text not null default 'new',
         sha256 text, attempts integer not null default 0, next_attempt real not null default 0,
         error text, quarantined integer not null default 0, completed_at text)""")
+    if "first_seen" not in {r[1] for r in db.execute("pragma table_info(recordings)")}:
+        db.execute("alter table recordings add column first_seen real not null default 0")
+    if "source_record" not in {r[1] for r in db.execute("pragma table_info(recordings)")}:
+        db.execute("alter table recordings add column source_record text")
     db.commit()
-    return db
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 
 def run_process(command: list[str], log: Path, timeout: int = 3600) -> None:
@@ -160,6 +169,26 @@ def process_record(db, row, record, workspace, client, cfg, *, speech=transcribe
 
 
 def sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=summarize) -> dict:
+    cutoff = cfg.get("plaud", {}).get("since")
+    if not cutoff:
+        raise PlaudError("Set [plaud] since to an explicit YYYY-MM-DD before first intake")
+    datetime.strptime(cutoff, "%Y-%m-%d")
+    owned = client is None
+    if owned:
+        pcfg = cfg.get("plaud", {})
+        if pcfg.get("transport") == "official-mcp":
+            from plaud_mcp import PlaudMcpClient
+            client = PlaudMcpClient(pcfg)
+        elif pcfg.get("transport") not in (None, "web-session", "legacy"):
+            raise PlaudError("Unknown Plaud transport; no silent fallback")
+    try:
+        return _sync(workspace, cfg, client=client, speech=speech, summary=summary)
+    finally:
+        if owned and client is not None and hasattr(client, "close"):
+            client.close()
+
+
+def _sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=summarize) -> dict:
     os.umask(0o077)
     cutoff = cfg.get("plaud", {}).get("since")
     if not cutoff:
@@ -172,7 +201,14 @@ def sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=
                                   since=cutoff, timezone=pcfg.get("timezone", "America/New_York"))
                       if pcfg.get("session_file") else
                       PlaudClient(token_from_config(pcfg), pcfg.get("domain", "https://api.plaud.ai")))
-        records = client.list_files()
+        inventory_failed = False
+        try:
+            records = client.list_files()
+        except PlaudError:
+            # Inventory outage must remain visible, but locally retained speech
+            # and summary checkpoints do not need another vendor API request.
+            records = []
+            inventory_failed = True
         # No moving watermark: retries and delayed uploads are re-discovered by stable id.
         zone = ZoneInfo(cfg.get("plaud", {}).get("timezone", "America/New_York"))
         selected = sorted((r for r in records if recording_date(r).astimezone(zone).date().isoformat() >= cutoff),
@@ -180,21 +216,35 @@ def sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=
         allow = cfg.get("plaud", {}).get("file_ids")
         if allow is not None:
             selected = [r for r in selected if (r.get("id") or r.get("file_id")) in allow]
-        result = {"listed": len(records), "selected": len(selected), "complete": 0, "failed": 0, "skipped": 0}
+        present = {r.get("id") or r.get("file_id") for r in selected}
+        for row in db.execute("select * from recordings where stage!='complete'").fetchall():
+            if row["id"] in present or allow is not None and row["id"] not in allow:
+                continue
+            if row["source_record"]:
+                selected.append(json.loads(row["source_record"]))
+            else:
+                path = workspace / "meetings" / row["folder"] / "metadata.json"
+                if path.exists():
+                    meta = json.loads(path.read_text())
+                    selected.append({"id": row["id"], "name": meta["title"], "start_at": meta["date"]})
+                else:
+                    inventory_failed = True
+        result = {"listed": len(records), "selected": len(selected), "complete": 0, "failed": int(inventory_failed), "skipped": 0}
         processed = 0
         for record in selected:
             file_id = record.get("id") or record.get("file_id")
             if not isinstance(file_id, str) or not file_id:
                 raise PlaudError("Plaud recording has no stable id")
             folder = recording_date(record).astimezone(zone).strftime("%Y-%m-%d") + "-" + hashlib.sha256(file_id.encode()).hexdigest()[:24]
-            db.execute("insert or ignore into recordings(id,folder) values (?,?)", (file_id, folder))
+            db.execute("insert or ignore into recordings(id,folder,first_seen,source_record) values (?,?,?,?)",
+                       (file_id, folder, time.time(), json.dumps(record)))
             db.commit()
             row = db.execute("select * from recordings where id=?", (file_id,)).fetchone()
             if row["stage"] == "complete" or row["quarantined"] or row["next_attempt"] > time.time():
                 result["skipped"] += 1
                 continue
             if processed >= int(cfg.get("plaud", {}).get("max_per_pass", 10)):
-                break
+                continue  # Inventory all IDs even when this pass cannot process them.
             processed += 1
             try:
                 process_record(db, row, record, workspace, client, cfg, speech=speech, summary=summary)
@@ -212,6 +262,19 @@ def sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary=
                            (attempts, int(attempts >= 2), time.time() + 300, category, file_id))
                 db.commit()
                 result["failed"] += 1
+        if cfg.get("delivery", {}).get("mode") == "prepare":
+            from openbrain_delivery import enqueue
+            for row in db.execute("select * from recordings where stage='complete'").fetchall():
+                try:
+                    enqueue(workspace, workspace / "meetings" / row["folder"])
+                except Exception:
+                    # A verified file changed or its evidence is missing. Never
+                    # silently queue it merely because intake was once complete.
+                    result["failed"] += 1
+        pending = db.execute("select count(*),min(first_seen) from recordings where stage!='complete'").fetchone()
+        result["pending"] = pending[0]
+        result["oldest_pending_age_seconds"] = round(max(0, time.time() - pending[1])) if pending[1] else 0
+        result["backlog_overdue"] = result["oldest_pending_age_seconds"] > int(cfg.get("plaud", {}).get("backlog_sla_seconds", 14400))
         result["quarantined"] = db.execute("select count(*) from recordings where quarantined=1").fetchone()[0]
         result["at"] = datetime.now(timezone.utc).isoformat()
         atomic_write(workspace / "freshness.json", json.dumps(result, indent=2))
@@ -243,21 +306,31 @@ def install(workspace: Path, config: Path, interval: int = 900) -> Path:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("sync", "status", "install", "retry"))
+    p.add_argument("command", choices=("sync", "status", "install", "retry", "revise"))
     p.add_argument("--workspace", required=True, type=Path)
     p.add_argument("--config", type=Path)
     p.add_argument("--file-id")
+    p.add_argument("--from-stage", choices=("downloaded", "transcribed"))
     a = p.parse_args()
     try:
         if a.command == "status":
             data = json.loads((a.workspace / "freshness.json").read_text())
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(data["at"])).total_seconds()
             print(json.dumps({**data, "age_seconds": round(age), "stale": age > 1800}))
-            return 1 if age > 1800 or data.get("failed") or data.get("quarantined") else 0
-        if a.command == "retry":
+            return 1 if age > 1800 or data.get("failed") or data.get("quarantined") or data.get("backlog_overdue") else 0
+        if a.command in ("retry", "revise"):
             if not a.file_id:
-                p.error("retry requires an exact --file-id")
+                p.error("retry/revise requires an exact --file-id")
             with locked(a.workspace), database(a.workspace) as db:
+                row = db.execute("select * from recordings where id=?", (a.file_id,)).fetchone()
+                if not row:
+                    raise PlaudError("Recording is not in this workspace")
+                if a.command == "revise":
+                    if not a.from_stage or row["stage"] != "complete":
+                        raise PlaudError("revise needs a completed recording and explicit --from-stage")
+                    db.execute("update recordings set stage=?,completed_at=null where id=?", (a.from_stage, a.file_id))
+                elif row["stage"] == "complete":
+                    raise PlaudError("Completed recording requires revise, not retry")
                 db.execute("update recordings set attempts=0,quarantined=0,next_attempt=0 where id=?", (a.file_id,))
             return 0
         if not a.config:
@@ -268,7 +341,7 @@ def main() -> int:
             return 0
         result = sync(a.workspace, cfg)
         print(json.dumps(result))
-        return 1 if result["failed"] or result["quarantined"] else 0
+        return 1 if result["failed"] or result["quarantined"] or result.get("backlog_overdue") else 0
     except (PlaudError, SummaryError, OSError, ValueError, subprocess.SubprocessError) as e:
         if a.command == "sync" and a.workspace.is_dir():
             atomic_write(a.workspace / "freshness.json", json.dumps({"at": datetime.now(timezone.utc).isoformat(),
