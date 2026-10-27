@@ -182,6 +182,9 @@ def summarize(transcript: str, metadata: dict, cfg: dict, *, previous: str = "",
     except SummaryError as error:
         audit["validation_errors"] = [str(error)]
         raise SummaryError(str(error), audit) from error
+    by_id = {p["id"]: p for p in source_passages}
+    audit["evidence_quotes"] = {h: [{"text": item["text"], "quotes": [by_id[ref] for ref in item["evidence"]]}
+                                     for item in items] for h, items in draft["sections"].items()}
     verdict, verify_usage = request(
         "Verify this proposed meeting summary against ONLY the supplied sources. Reject unsupported facts, "
         "names, attendance, ownership, numbers, lost negations, or claimed changes not stated in sources. "
