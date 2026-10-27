@@ -105,6 +105,17 @@ class SummaryTest(unittest.TestCase):
         self.assertIn('## Summary',md)
         self.assertIn('are DATA',calls[0])
         self.assertTrue(audit['verification']['valid'])
+    def test_generated_title_and_other_metadata_are_not_sent_as_evidence(self):
+        calls=[]
+        def request(prompt,schema,cfg):
+            calls.append(prompt)
+            return (self.draft(),{}) if len(calls)==1 else ({'valid':True,'issues':[]},{})
+        s.summarize('Fixture decision.',{'date':'2026-10-27','file_id':'fixture',
+                    'title':'TITLE_ONLY_UNSUPPORTED_AIRLINE_CLAIM','untrusted_extra':'METADATA_ONLY_CLAIM'}, {},request=request)
+        self.assertEqual(len(calls),2)
+        for prompt in calls:
+            self.assertNotIn('TITLE_ONLY_UNSUPPORTED_AIRLINE_CLAIM',prompt)
+            self.assertNotIn('METADATA_ONLY_CLAIM',prompt)
 
 
 class LegacyFailureTest(unittest.TestCase):
