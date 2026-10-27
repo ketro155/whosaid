@@ -78,7 +78,7 @@ if [[ -z "$WHOSAID_PY" ]]; then
   # Only the commands that run a lib/*.py module or inline snippet need it;
   # transcribe/record/enroll/relabel/install/setup/mcp/help/version/doctor do not.
   case "${1:-}" in
-    samples|speakers|teams|outlook|ingest|backfill|roll-up|rollup|reprocess|commitments|worklist|index|search|context|graph|wiki|watch|memos)
+    plaud|summary|samples|speakers|teams|outlook|ingest|backfill|roll-up|rollup|reprocess|commitments|worklist|index|search|context|graph|wiki|watch|memos)
       echo "whosaid: no Python >= 3.11 found; set WHOSAID_PYTHON=/path/to/python3.11+ or run: uv python install 3.13" >&2
       exit 1
       ;;
@@ -2338,6 +2338,12 @@ cmd_memos() {
 
 # ---- dispatch --------------------------------------------------------------------
 case "${1:-}" in
+  plaud)
+    exec "$WHOSAID_PY" "$REPO_DIR/lib/plaud_pipeline.py" "${@:2}"
+    ;;
+  summary)
+    exec "$WHOSAID_PY" "$REPO_DIR/lib/openbrain_summary.py" "${@:2}"
+    ;;
   setup)
     exec "$REPO_DIR/bootstrap.sh" "${@:2}"
     ;;

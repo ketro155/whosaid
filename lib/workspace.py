@@ -599,12 +599,12 @@ def run_hook(hook: str, transcript: Path, text: str, speakers: list[str],
             capture_output=True, text=True,
         )
     except OSError as e:  # noqa: BLE001
-        log(f"WARN action-items hook failed to start ({e}); writing skeleton")
+        log(f"WARN action-items hook failed to start ({e}); no summary produced")
         return ""
     if proc.returncode == 0 and proc.stdout.strip():
         return proc.stdout
     tail = (proc.stderr or "").strip().splitlines()[-1:] or ["(no stderr)"]
-    log(f"WARN action-items hook exited {proc.returncode}: {tail[0]}; writing skeleton")
+    log(f"WARN action-items hook exited {proc.returncode}: {tail[0]}; no summary produced")
     return ""
 
 
@@ -614,7 +614,7 @@ def run_ollama_engine(text: str, meeting: str, cfg: dict) -> tuple[str, dict]:
         import action_items  # lazy: only the ollama engine needs it
         return action_items.draft(text, meeting, cfg)
     except Exception as e:  # noqa: BLE001
-        log(f"WARN action-items engine ollama failed ({type(e).__name__}: {e}); writing skeleton")
+        log(f"WARN action-items engine ollama failed ({type(e).__name__}: {e}); no summary produced")
         return "", {}
 
 
@@ -687,6 +687,11 @@ def cmd_action_items(args: argparse.Namespace) -> int:
         markdown, stats = run_ollama_engine(text, transcript.resolve().parent.name, cfg)
         if markdown:
             source = f"ollama:{stats.get('model', '')}"
+    if not markdown and engine != "none":
+        # A requested engine failed. Preserve any last good summary and make
+        # the failure visible to ingest/watch instead of committing a skeleton.
+        log(f"ERROR action-items engine {engine} failed; previous output preserved")
+        return 1
     if not markdown:
         markdown = skeleton_markdown(transcript, speakers)
 
