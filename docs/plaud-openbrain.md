@@ -20,7 +20,7 @@ uv pip install --python .venv/bin/python mlx-whisper==0.4.3 sherpa-onnx==2.0.0 n
 codex login status
 ```
 
-Keep the Plaud session outside the checkout with file permissions 0600. Plaud 4.0 sessions contain workspace_id, token, tokenType, expiresAt, refreshToken, and refreshExpiresAt. Use a current session from the user's authorized Plaud login; never commit a token or embed one in a command argument. The client refreshes the workspace token before expiry and atomically stores any rotated refresh token. Revocation or expired refresh credentials require sign-in again. Legacy token-command configuration is also supported for accounts still using the old API.
+Keep the Plaud session outside the checkout with file permissions 0600. Plaud 4.0 sessions contain workspace_id, token, tokenType, expiresAt, refreshToken, refreshExpiresAt, and the originating deviceId. Use a separate authorized login for the automation, rather than sharing token rotation with an actively used browser session. Close the temporary login tab after securely transferring its session to the processing host. Never commit a token or embed one in a command argument. The client refreshes the workspace token before expiry and atomically stores any rotated refresh token. Revocation or expired refresh credentials require sign-in again. Legacy token-command configuration is also supported for accounts still using the old API.
 
 Example private configuration:
 

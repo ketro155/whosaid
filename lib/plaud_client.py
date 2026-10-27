@@ -155,6 +155,8 @@ class Plaud4Client(PlaudClient):
                    "x-scope-id": self.session["workspace_id"], "x-scope-type": "workspace",
                    "app-platform": "web", "edit-from": "web", "User-Agent": "Mozilla/5.0",
                    "Accept": "application/json"}
+        if self.session.get("deviceId"):
+            headers["x-device-id"] = self.session["deviceId"]
         request = urllib.request.Request(validate_url(self.domain + path, api=True), headers=headers,
                                          method="POST" if refresh else "GET", data=b"" if refresh else None)
         try:
