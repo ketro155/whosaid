@@ -11,8 +11,8 @@ Input is a hand-off file: a list of message records, an object
 {"messages": [...], optional "chat_id", "url"}, the scraper's raw_by_chat map
 {"<chat>": {"messages": [...]}}, or NDJSON (one record per line). A record is
 {"chat", "author", "epoch_ms" | "epoch", "text"} with "timestamp_iso" | "ts"
-(ISO 8601) as the fallback clock, plus optional "chat_id", "url". epoch_ms wins
-over epoch. Records may be unsorted and duplicated (epoch dedups).
+(ISO 8601) as the fallback clock, plus optional "chat_id", "url", "message_id".
+epoch_ms wins over epoch. Records may be unsorted and duplicated.
 
 A record may carry "images": [{"alt", "src", "width", "height", "data" (data URL or
 null), "skipped"}] from the scraper's inline image capture. Each captured image is
@@ -29,7 +29,8 @@ Usage:
                                    [--source teams|outlook] [--dry-run]
 
 Re-ingest is idempotent: an existing folder holding the same chat-day is merged
-(dedup on epoch_ms) and rewritten in place, never renamed. Stdlib only.
+(dedup on epoch_ms plus the source message_id, when supplied) and rewritten in
+place, never renamed. Stdlib only.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -47,6 +49,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wsconfig  # noqa: E402
+from message_identity import assertion_parts, normalized  # noqa: E402
 
 
 
@@ -85,6 +88,24 @@ IMAGE_REF_RE = re.compile(r"\[image: ([^\]]+)\]")
 NOT_CAPTURED = "[image not captured]"
 DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|gif|webp);base64,(.*)$", re.S)
 IMAGE_EXT = {"png": "png", "jpeg": "jpg", "gif": "gif", "webp": "webp"}
+MessageKey = tuple[int, str, str]
+
+
+def _message_id(record: dict, epoch_ms: int) -> str:
+    explicit = record.get("message_id") or record.get("source_message_id")
+    mid = record.get("mid")
+    if not explicit and mid is not None and str(mid) != str(epoch_ms):
+        explicit = mid
+    return str(explicit or "")
+
+
+def _message_key(epoch_ms: int, message_id: str, speaker: str, text: str) -> MessageKey:
+    # Old exports have no source ID. A millisecond alone cannot distinguish
+    # simultaneous authors/messages. Ignore only image paths added by ingest.
+    body = IMAGE_REF_RE.sub("", text).replace(NOT_CAPTURED, "")
+    fallback = "" if message_id else hashlib.sha256(
+        json.dumps([speaker, normalized(body)], ensure_ascii=False).encode()).hexdigest()
+    return epoch_ms, message_id, fallback
 
 
 class TeamsError(Exception):
@@ -165,8 +186,12 @@ def load_export(path: str | os.PathLike) -> list[dict]:
             flat: list = []
             for key, val in data.items():
                 for m in val["messages"]:
-                    if isinstance(m, dict) and m.get("chat") is None:
-                        m = dict(m, chat=key)
+                    if isinstance(m, dict):
+                        m = dict(m)
+                        m.setdefault("chat", key)
+                        for field in ("chat_id", "url"):
+                            if not m.get(field) and val.get(field):
+                                m[field] = val[field]
                     flat.append(m)
             data = flat
         elif "messages" not in data and "author" in data and "text" in data:
@@ -202,6 +227,8 @@ def load_export(path: str | os.PathLike) -> list[dict]:
             "epoch_ms": ms,
             "text": rec["text"],
             "images": images,
+            "message_id": _message_id(rec, ms),
+            "attribution": assertion_parts(rec["text"], rec),
         })
     # A chat whose records carry a chat_id on only some of them is one chat:
     # propagate the first id (and url) seen for each chat name to the rest.
@@ -277,11 +304,15 @@ def resolve_tz(flag: str | None, cfg: dict) -> tzinfo:
         raise TeamsError(f"unknown timezone {name!r} ({e})") from None
 
 
-def local_dt(epoch_ms: int, tz: tzinfo) -> datetime:
+def local_dt(epoch_ms: int | MessageKey, tz: tzinfo) -> datetime:
+    if isinstance(epoch_ms, tuple):
+        epoch_ms = epoch_ms[0]
     return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).astimezone(tz)
 
 
-def utc_iso(epoch_ms: int) -> str:
+def utc_iso(epoch_ms: int | MessageKey) -> str:
+    if isinstance(epoch_ms, tuple):
+        epoch_ms = epoch_ms[0]
     return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -291,8 +322,10 @@ def chat_identity(chat_id: str | None, chat_name: str) -> str:
 
 def group_chat_days(records: list[dict], tz: tzinfo, name_map: dict[str, str]) -> list[dict]:
     """Group records into chat-days. Each group:
-    {chat_name, chat_id, url, day, messages: {epoch_ms: (speaker, text)}, images: {epoch_ms: [image]},
-    names: {display: canonical}}. Dedups on epoch_ms (last record wins); drops messages with
+    {chat_name, chat_id, url, day, messages: {MessageKey: (speaker, text)},
+    images: {MessageKey: [image]}, names: {display: canonical}}.
+    Dedups on timestamp and source ID, or exact speaker/body when no ID exists;
+    drops messages with
     no text after whitespace collapse and no images."""
     groups: dict[tuple[str, str], dict] = {}
     for rec in records:
@@ -304,18 +337,21 @@ def group_chat_days(records: list[dict], tz: tzinfo, name_map: dict[str, str]) -
         ident = chat_identity(rec["chat_id"], rec["chat"])
         g = groups.setdefault((ident, day), {
             "chat_name": rec["chat"], "chat_id": rec["chat_id"], "url": rec["url"],
-            "day": day, "messages": {}, "images": {}, "names": {},
+            "day": day, "messages": {}, "images": {}, "names": {}, "metadata": {},
         })
         if rec["chat_id"] and not g["chat_id"]:
             g["chat_id"] = rec["chat_id"]
         if rec["url"] and not g["url"]:
             g["url"] = rec["url"]
         speaker = resolve_speaker(rec["author"], name_map)
-        g["messages"][rec["epoch_ms"]] = (speaker, text)
+        mid = str(rec.get("message_id") or "")
+        key = _message_key(rec["epoch_ms"], mid, speaker, text)
+        g["messages"][key] = (speaker, text)
+        g["metadata"][key] = {"message_id": mid, **(rec.get("attribution") or {})}
         if images:
-            g["images"][rec["epoch_ms"]] = images
+            g["images"][key] = images
         else:
-            g["images"].pop(rec["epoch_ms"], None)
+            g["images"].pop(key, None)
         g["names"][_one_line(rec["author"])] = speaker
     return sorted(groups.values(), key=lambda g: (g["day"], min(g["messages"])))
 
@@ -360,11 +396,13 @@ def pick_folder_name(ws: Path, group: dict, tz: tzinfo, reserved: set[str]) -> s
     return name
 
 
-def existing_messages(sidecar: dict | None) -> dict[int, tuple[str, str]]:
-    out: dict[int, tuple[str, str]] = {}
+def existing_messages(sidecar: dict | None) -> dict[MessageKey, tuple[str, str]]:
+    out: dict[MessageKey, tuple[str, str]] = {}
     for seg in (sidecar or {}).get("segments", []) or []:
         if isinstance(seg, dict) and isinstance(seg.get("epoch_ms"), int):
-            out[seg["epoch_ms"]] = (str(seg.get("speaker", "Unknown")), str(seg.get("text", "")))
+            key = _message_key(seg["epoch_ms"], _message_id(seg, seg["epoch_ms"]),
+                               str(seg.get("speaker", "Unknown")), str(seg.get("text", "")))
+            out[key] = (str(seg.get("speaker", "Unknown")), str(seg.get("text", "")))
     return out
 
 
@@ -385,12 +423,15 @@ def decode_data_url(data) -> tuple[str, bytes] | None:
         return None
 
 
-def attach_images(folder: Path, epoch_ms: int, text: str, images: list[dict], *,
+def attach_images(folder: Path, epoch_ms: int | MessageKey, text: str, images: list[dict], *,
                   write: bool, src: Source = TEAMS) -> str:
     """Write a message's captured images under <folder>/<base>-images/ and return the
     text with one reference per image. An image with no data reuses a file an earlier
     run wrote for the same slot."""
     rel_dir = image_dir_name(src)
+    if isinstance(epoch_ms, tuple):
+        epoch, mid = epoch_ms[:2]
+        epoch_ms = str(epoch) + ("-" + hashlib.sha256(mid.encode()).hexdigest()[:12] if mid else "")
     refs = []
     for n, img in enumerate(images, 1):
         decoded = decode_data_url(img.get("data"))
@@ -420,7 +461,7 @@ def keep_earlier_refs(old: str | None, new: str) -> str:
 
 # ---- C4 / C5: render --------------------------------------------------------------------
 
-def render_speakers(chat_name: str, scraped_date: str, messages: dict[int, tuple[str, str]],
+def render_speakers(chat_name: str, scraped_date: str, messages: dict[MessageKey, tuple[str, str]],
                     roles: dict[str, str], tz: tzinfo, src: Source = TEAMS) -> str:
     speakers = sorted({s for s, _ in messages.values()})
     lines = [
@@ -444,7 +485,7 @@ def _sec_of_day(ms: int, tz: tzinfo) -> int:
     return d.hour * 3600 + d.minute * 60 + d.second
 
 
-def render_sidecar(group: dict, messages: dict[int, tuple[str, str]], names: dict[str, str],
+def render_sidecar(group: dict, messages: dict[MessageKey, tuple[str, str]], names: dict[str, str],
                    roles: dict[str, str], tz: tzinfo, scraped_at: str, src: Source = TEAMS) -> dict:
     order = sorted(messages)
     speakers = {s for s, _ in messages.values()}
@@ -452,7 +493,13 @@ def render_sidecar(group: dict, messages: dict[int, tuple[str, str]], names: dic
     for ms in order:
         spk, text = messages[ms]
         t = _sec_of_day(ms, tz)
-        seg = {"start": t, "end": t, "speaker": spk, "epoch_ms": ms, "mid": str(ms), "text": text}
+        epoch, mid = ms[:2] if isinstance(ms, tuple) else (ms, "")
+        seg = {"start": t, "end": t, "speaker": spk, "epoch_ms": epoch, "mid": mid or str(epoch), "text": text}
+        metadata = (group.get("metadata") or {}).get(ms, {})
+        if mid:
+            seg["message_id"] = mid
+        if metadata.get("quoted") or metadata.get("attribution_uncertain"):
+            seg.update({k: metadata[k] for k in ("assertion_text", "quoted", "attribution_uncertain") if k in metadata})
         images = IMAGE_REF_RE.findall(text)
         if images:
             seg["images"] = images
@@ -500,6 +547,11 @@ def ingest(export: str | os.PathLike, ws: str | os.PathLike, *, tz_flag: str | N
         folder = find_existing(ws, g, src)
         old_sc = read_sidecar(folder, src) if folder else None
         merged = existing_messages(old_sc)
+        for segment in (old_sc or {}).get("segments", []):
+            if isinstance(segment, dict) and isinstance(segment.get("epoch_ms"), int):
+                key = _message_key(segment["epoch_ms"], _message_id(segment, segment["epoch_ms"]),
+                                   str(segment.get("speaker", "Unknown")), str(segment.get("text", "")))
+                g["metadata"].setdefault(key, segment)
         known = set(merged)
         if folder is None:
             name = pick_folder_name(ws, g, tz, reserved)

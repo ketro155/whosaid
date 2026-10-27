@@ -70,7 +70,7 @@ import time
 import urllib.error
 import urllib.request
 from array import array
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -79,6 +79,7 @@ from wsconfig import (  # noqa: E402
     iter_meetings, load_config, log, ollama_up, ollama_url, parse_turns,
     resolve_workspace, search_db, tsec,
 )
+from message_identity import MessageIndex  # noqa: E402
 
 try:
     import numpy as np  # optional: vectorized cosine over the embedding matrix
@@ -125,11 +126,32 @@ class Hit:
     line: int
     snippet: str | None     # FTS5 snippet with »match« markers (exact/both only)
     rowid: int = 0
+    message_id: str | None = None
+    provenance: list[dict] = field(default_factory=list)
+    assertion_text: str | None = None
+    quoted: bool = False
+    attribution_uncertain: bool = False
 
     def as_json(self) -> dict:
         d = asdict(self)
         d.pop("rowid")
         return d
+
+
+def annotate_hit(conn: sqlite3.Connection, hit: Hit) -> Hit:
+    """Attach source identity without changing the verbatim searchable turn."""
+    if not has_table(conn, "seg_message"):
+        return hit  # indexes built by an older version remain readable
+    row = conn.execute("SELECT message_id, attribution FROM seg_message WHERE rowid=?", (hit.rowid,)).fetchone()
+    if row:
+        hit.message_id, attribution = row
+        values = json.loads(attribution)
+        hit.assertion_text = values.get("assertion_text")
+        hit.quoted = bool(values.get("quoted"))
+        hit.attribution_uncertain = bool(values.get("attribution_uncertain"))
+        pointer = conn.execute("SELECT pointers FROM message_provenance WHERE message_id=?", (hit.message_id,)).fetchone()
+        hit.provenance = json.loads(pointer[0]) if pointer else []
+    return hit
 
 
 # ---- db plumbing --------------------------------------------------------------------
@@ -265,6 +287,7 @@ def build(ws: Path, embed: bool = True, rebuild: bool = False, cfg: dict | None 
         raise SearchError(f"workspace not found: {ws}")
     db = search_db(ws)
     rows = collect_segments(ws)
+    identities = MessageIndex(ws)
     if not rows:
         log(f"WARN no *.speakers.txt turns under {ws}; the index will be empty")
     model = str(cfg["search"].get("embed_model") or "nomic-embed-text")
@@ -281,6 +304,17 @@ def build(ws: Path, embed: bool = True, rebuild: bool = False, cfg: dict | None 
                 "INSERT INTO seg(meeting, source, speaker, t_sec, t_str, line, text) VALUES (?,?,?,?,?,?,?)",
                 rows,
             )
+            conn.execute("DROP TABLE IF EXISTS seg_message")
+            conn.execute("DROP TABLE IF EXISTS message_provenance")
+            conn.execute("CREATE TABLE seg_message(rowid INTEGER PRIMARY KEY, message_id TEXT, attribution TEXT)")
+            conn.execute("CREATE TABLE message_provenance(message_id TEXT PRIMARY KEY, pointers TEXT)")
+            for rid, (meeting, source, _speaker, sec, _stamp, line, _text) in enumerate(rows, 1):
+                identity = identities.resolve(meeting, t_sec=sec, line=line, source=source)
+                if identity:
+                    attribution = {k: identity[k] for k in ("assertion_text", "quoted", "attribution_uncertain")}
+                    conn.execute("INSERT INTO seg_message VALUES (?,?,?)", (rid, identity["message_id"], json.dumps(attribution)))
+            conn.executemany("INSERT INTO message_provenance VALUES (?,?)",
+                             [(key, json.dumps(pointers)) for key, pointers in identities.by_id.items()])
             if rebuild:
                 conn.execute("DROP TABLE IF EXISTS emb")
             conn.execute(EMB_DDL)
@@ -383,18 +417,28 @@ def exact_hits(conn: sqlite3.Connection, q: str, k: int, speaker: str | None = N
     text column; the raw query (so callers can use their own column filters and operators);
     the query with every word quoted (so PR-42 or don't never trip the parser)."""
     q = q.strip()
-    if not q:
+    if not q or k <= 0:
         return []
     where, params = _filters(speaker, meeting)
     sql = (f"SELECT {SEG_COLS}, snippet(seg, 6, '»', '«', '…', {SNIPPET_TOKENS}), bm25(seg) "
-           f"FROM seg WHERE seg MATCH ?{where} ORDER BY rank LIMIT ?")
+           f"FROM seg WHERE seg MATCH ?{where} ORDER BY rank")
     attempts = [f"text : ({q})", q, f"text : ({_quote_tokens(q)})"]
     if "{" in q or re.search(r"\w\s*:", q):
         attempts[0], attempts[1] = attempts[1], attempts[0]   # the caller wrote a column filter: raw first
-    rows: list = []
     for n, match in enumerate(attempts):
         try:
-            rows = conn.execute(sql, [match, *params, k]).fetchall()
+            cursor = conn.execute(sql, [match, *params])
+            out, seen = [], set()
+            for rid, m, src, spk, sec, ts, ln, txt, snip, bm in cursor:
+                hit = annotate_hit(conn, Hit(meeting=m, t_sec=int(sec), t_str=ts, speaker=spk,
+                    text=txt, score=round(-float(bm), 4), source="exact", file=src, line=int(ln), snippet=snip, rowid=rid))
+                key = hit.message_id or f"row:{rid}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(hit)
+                if len(out) >= k:
+                    break
         except sqlite3.OperationalError as e:
             # FTS5 parse trouble surfaces as "fts5: syntax error ..." or, for things like
             # PR-42 (a dash reads as a negated column filter), "no such column: 42".
@@ -406,11 +450,7 @@ def exact_hits(conn: sqlite3.Connection, q: str, k: int, speaker: str | None = N
         if n == len(attempts) - 1:
             log("exact: FTS5 could not parse the query as written; searching for the words themselves")
         break
-    return [
-        Hit(meeting=m, t_sec=int(sec), t_str=ts, speaker=spk, text=txt, score=round(-float(bm), 4),
-            source="exact", file=src, line=int(ln), snippet=snip, rowid=rid)
-        for (rid, m, src, spk, sec, ts, ln, txt, snip, bm) in rows or []
-    ]
+    return out
 
 
 # ---- query: meaning -----------------------------------------------------------------
@@ -486,7 +526,8 @@ def meaning_hits(conn: sqlite3.Connection, db: Path, cfg: dict, q: str, k: int,
         sims = [_dot(qv, row) for row in matrix]
     out: list[Hit] = []
     # over-fetch when filtering, then keep the first k that pass
-    want = k if not (spk_f or mtg_f) else min(len(segs), max(k * 20, CANDIDATES))
+    want = len(segs) if has_table(conn, "seg_message") else (k if not (spk_f or mtg_f) else min(len(segs), max(k * 20, CANDIDATES)))
+    seen = set()
     for i in _top_indices(sims, min(want, len(segs))):
         if sims[i] <= 0:      # descending order: nothing after this is related to the query
             break
@@ -495,9 +536,14 @@ def meaning_hits(conn: sqlite3.Connection, db: Path, cfg: dict, q: str, k: int,
             continue
         if mtg_f and mtg_f not in m.lower():
             continue
-        out.append(Hit(meeting=m, t_sec=int(sec), t_str=ts, speaker=spk, text=txt,
+        hit = annotate_hit(conn, Hit(meeting=m, t_sec=int(sec), t_str=ts, speaker=spk, text=txt,
                        score=round(float(sims[i]), 4), source="meaning", file=src, line=int(ln),
                        snippet=None, rowid=rid))
+        key = hit.message_id or f"row:{rid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(hit)
         if len(out) >= k:
             break
     return out
@@ -508,14 +554,15 @@ def hybrid_hits(conn: sqlite3.Connection, db: Path, cfg: dict, q: str, k: int,
     """Reciprocal-rank fusion of the exact and meaning candidate lists; tags exact/meaning/both."""
     sem = meaning_hits(conn, db, cfg, q, CANDIDATES, speaker, meeting)   # raises -> caller falls back
     ex = exact_hits(conn, q, CANDIDATES, speaker, meeting)
-    sem_rank = {h.rowid: r for r, h in enumerate(sem)}
-    ex_rank = {h.rowid: r for r, h in enumerate(ex)}
-    by_id: dict[int, Hit] = {h.rowid: h for h in sem}
+    identity = lambda h: h.message_id or h.rowid
+    sem_rank = {identity(h): r for r, h in enumerate(sem)}
+    ex_rank = {identity(h): r for r, h in enumerate(ex)}
+    by_id = {identity(h): h for h in sem}
     for h in ex:
-        if h.rowid in by_id:
-            by_id[h.rowid].snippet = h.snippet
+        if identity(h) in by_id:
+            by_id[identity(h)].snippet = h.snippet
         else:
-            by_id[h.rowid] = h
+            by_id[identity(h)] = h
     fused = []
     for rid, h in by_id.items():
         score = 0.0

@@ -285,7 +285,7 @@ assert_eq "$(printf '%s\n' "$OUT" | tail -1)" "2 hit(s)." "raw FTS5 column filte
 run query "$WS" '"onboarding docs"' --json
 assert_eq "$RC" 0 "phrase query --json exits 0"
 assert_eq "$(py 'len(d)')" "2" "phrase query: 2 hits"
-assert_eq "$(py 'sorted(d[0].keys())')" "['file', 'line', 'meeting', 'score', 'snippet', 'source', 'speaker', 't_sec', 't_str', 'text']" \
+assert_eq "$(py 'sorted(d[0].keys())')" "['assertion_text', 'attribution_uncertain', 'file', 'line', 'meeting', 'message_id', 'provenance', 'quoted', 'score', 'snippet', 'source', 'speaker', 't_sec', 't_str', 'text']" \
   "--json hit keys"
 assert_eq "$(py 'sorted(h["text"][-19:] for h in d)')" "[' docs are half done', 'the onboarding docs']" \
   "continuation line folded into the previous turn"
