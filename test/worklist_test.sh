@@ -485,7 +485,7 @@ live = json.loads(Path(sys.argv[3]).read_text())
 assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00", cache.pop("generated_at")), "generated_at"
 corpora = cache.pop("corpora")
 assert corpora == w.corpora_digests(Path(sys.argv[2]).parent), corpora
-assert set(corpora) == {"_commitments.json", "_action-items.json", "whosaid.toml"}, corpora
+assert set(corpora) == {"_commitments.json", "_action-items.json", "whosaid.toml", w.WORKLIST_SOURCE_FINGERPRINT}, corpora
 assert cache == live, "cache payload == worklist --json"
 assert w.worklist_cache_filename("Alice Example") == "_WORKLIST-Alice_Example.json"
 print("ok")

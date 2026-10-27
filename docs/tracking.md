@@ -156,3 +156,16 @@ deadline, configurable with `--timeout`.
   from within the scan when reached.
 
 The supplied `ledger` argument lets a caller load once for several read views.
+
+## Cache freshness
+
+Cached worklists retain their generation time and report whether their inputs
+have changed. The fingerprint covers corpus files, the ledger, configuration,
+and the transcript and matching diarization sidecar files used for attribution.
+It detects content edits even when file timestamps are preserved, and detects
+added or removed sources. Older caches without source fingerprints are readable
+but marked stale. Read queries do not rewrite them.
+
+Freshness describes input changes, not a frozen historical snapshot or an
+expiration policy. Date-sensitive ranking can age without a file change.
+Historical queries require live reconciliation instead of a current cache.

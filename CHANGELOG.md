@@ -25,7 +25,10 @@ All notable changes to whosaid are documented here. This project adheres to
   Explicit limits retain their requested size. Worklist replies also include
   `next_offset` when more items remain.
 - Compact rows include status, kind, acceptance, and evidence availability (#112).
-- Ledger/config changes invalidate cached worklists and paging snapshots.
+- Corpus, ledger, config, transcript, and diarization sidecar changes invalidate
+  cached worklists and paging snapshots, including source additions and removals
+  and edits that preserve file timestamps. Older caches without source
+  fingerprints are marked stale.
   Historical requests cannot fall back to current cached state (#113).
 - Worklist views retain delivered/partial evidence, exclude standing directives
   and inferred tasks from overdue ranking, and include accepted handoff recipients

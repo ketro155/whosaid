@@ -1925,9 +1925,10 @@ def _worklist_cache(ws: Path, who: str) -> tuple:
     """(cache payload with freshness fields, None) or (None, error dict).
 
     Read-only: finds the _WORKLIST-<Owner>.json the roll-up writes next to
-    _WORKLIST-<Owner>.md (GitHub issue #113). stale = the corpora's sha256
-    differ from the "corpora" digests the cache records (mtimes when it
-    records none). 'me' resolves the way the CLI
+    _WORKLIST-<Owner>.md (GitHub issue #113). stale = the corpus/config/source
+    fingerprints differ from the "corpora" digests the cache records. Legacy
+    caches without complete source coverage remain readable but stale.
+    'me' resolves the way the CLI
     does (workspace.resolve_owner: the self-roled speaker, else [workspace]
     owner), which only reads small per-meeting files, never the corpora."""
     import workspace as wsmod  # lazy: keeps this module's import cheap
@@ -1957,9 +1958,12 @@ def _worklist_cache(ws: Path, who: str) -> tuple:
     recorded = data.get("corpora")
     if isinstance(recorded, dict):
         # The roll-up recorded what it built the cache from: compare content.
-        stale = recorded != wsmod.corpora_digests(ws)
-    else:  # a cache written without digests: fall back to mtimes
-        stale = newest > cache_mtime
+        try:
+            stale = recorded != wsmod.corpora_digests(ws)
+        except OSError:
+            stale = True  # unreadable inputs cannot prove freshness
+    else:
+        stale = True  # mtimes cannot establish the legacy cache's source coverage
     data["owner"] = data.get("owner") or owner
     meta = {
         "cache_file": path.name,

@@ -932,7 +932,9 @@ import; they neither verify external artifacts nor change status automatically.
 The existing item/worklist tools accept `kind`, `accepted_only`, and `as_of`.
 Every omitted page limit caps the response at 50, including offset-only calls.
 Compact rows retain status, kind, acceptance, and evidence availability. Snapshot
-tokens and cache freshness cover corpus, ledger, and configuration changes.
+tokens and cache freshness cover corpus, ledger, configuration, transcript, and
+diarization sidecar content changes, including added and removed sources.
+Older caches without source fingerprints remain readable but are marked stale.
 Historical queries cannot substitute a current cached answer. Live worklists use
 source identity and do not probe or call an embedding model.
 

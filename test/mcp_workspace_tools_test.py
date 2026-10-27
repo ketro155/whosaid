@@ -895,7 +895,7 @@ def test_worklist_diagnostics(tmp: Path) -> None:
                     "merged_into": ""} for i in range(3)]
 
     def write_cache(ws: Path, age_vs_corpora: float, digests: str = "") -> Path:
-        """digests: '' = none recorded (mtime rule), 'match' / 'mismatch' = the roll-up's sha256s."""
+        """digests: '' = legacy, 'match' / 'mismatch' = current source fingerprints."""
         cache = ws / "_WORKLIST-Alice_Example.json"
         body = {"owner": "Alice_Example", "generated_from": ["2026-01-05-0900"],
                 "items": cache_items, "generated_at": "2026-01-06T10:00:00+00:00"}
@@ -957,8 +957,8 @@ def test_worklist_diagnostics(tmp: Path) -> None:
         check(out.get("category") == "timeout" and out.get("phase") == "prime Alice_Example", f"prime phase: {out}")
         check("source identity" in out["hint"] and "do not call an embedding model" in out["hint"], f"prime-phase hint: {out}")
 
-        # 3) timeout + a cache newer than both corpora: attached, stale false, sliced like a fresh result
-        write_cache(ws, +60)
+        # 3) timeout + a cache with matching input fingerprints: attached, fresh and sliced
+        write_cache(ws, +60, digests="match")
         out = mcp_server.whosaid_worklist(workspace=str(ws), owner="me", limit=2, compact=True)
         print("example timeout + fresh cache:", json.dumps(out))
         cached = out.get("cached") or {}
@@ -978,7 +978,7 @@ def test_worklist_diagnostics(tmp: Path) -> None:
         out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example")
         check((out.get("cached") or {}).get("stale") is True, f"other digests: stale despite mtime: {out}")
 
-        # 4) timeout + a cache older than the corpora: stale true
+        # 4) timeout + a legacy cache without complete source coverage: stale true
         write_cache(ws, -60)
         out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example", tier="p1")
         print("example timeout + stale cache:", json.dumps(out))

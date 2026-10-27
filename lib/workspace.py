@@ -2950,13 +2950,18 @@ def worklist_cache_filename(owner: str) -> str:
 
 
 WORKLIST_CORPORA = ("_commitments.json", "_action-items.json", "_tracking.json", "whosaid.toml")
+WORKLIST_SOURCE_FINGERPRINT = "__message_identity_sources_v1__"
 
 
 def corpora_digests(ws: Path) -> dict[str, str]:
-    """{corpus file name: sha256} for the worklist corpora that exist: what a
-    cached worklist was built from, so a reader can tell stale from fresh by
-    content rather than by mtimes."""
-    return {n: sha256_file(ws / n) for n in WORKLIST_CORPORA if (ws / n).is_file()}
+    """Content hashes for corpora/config plus the source identity manifest.
+
+    The versioned manifest is present even with no transcripts, distinguishing
+    complete coverage from older caches that never tracked source dependencies.
+    """
+    from message_identity import source_fingerprint
+    return {**{n: sha256_file(ws / n) for n in WORKLIST_CORPORA if (ws / n).is_file()},
+            WORKLIST_SOURCE_FINGERPRINT: source_fingerprint(ws)}
 
 
 def write_worklist_cache(path: Path, payload: dict, corpora: dict[str, str]) -> bool:

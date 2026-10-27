@@ -89,6 +89,40 @@ def assertion_parts(text: str, metadata: dict | None = None) -> dict:
     return {"assertion_text": text, "quoted": False, "attribution_uncertain": False}
 
 
+def identity_sources(workspace: Path | str) -> list[tuple[str, list[tuple[Path, Path]]]]:
+    """The exact transcript/optional-sidecar pairs consumed by MessageIndex.
+
+    Share discovery with cache freshness so additions, removals and renamed
+    inputs follow the same folder rules as live source reconciliation.
+    """
+    return [(meeting, [(path, path.with_name(path.name.replace(".speakers.txt", ".diarization.json")))
+                       for path in files]) for meeting, files in iter_meetings(Path(workspace))]
+
+
+def source_fingerprint(workspace: Path | str) -> str:
+    """Content and relative names of identity inputs, including missing sidecars.
+
+    Timestamps are not evidence of unchanged content. An unpaired sidecar is
+    ignored, just as MessageIndex ignores it. Unreadable inputs raise OSError
+    so callers cannot label an unverified cached result fresh.
+    """
+    workspace = Path(workspace)
+    inputs = []
+    for _, pairs in identity_sources(workspace):
+        for pair in pairs:
+            for path in pair:
+                try:
+                    digest = hashlib.sha256()
+                    with path.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    value = digest.hexdigest()
+                except FileNotFoundError:
+                    value = None
+                inputs.append((path.relative_to(workspace).as_posix(), value))
+    return _digest(sorted(inputs))
+
+
 class MessageIndex:
     """Read-only identity index shared by search and commitment recurrence.
 
@@ -108,13 +142,12 @@ class MessageIndex:
         self.by_id = defaultdict(list)
         possible = defaultdict(list)
         possible_contexts = defaultdict(set)
-        for meeting, files in iter_meetings(self.workspace):
-            for path in files:
+        for meeting, pairs in identity_sources(self.workspace):
+            for path, sidecar_path in pairs:
                 try:
                     turns = parse_turns(path.read_text(encoding="utf-8", errors="replace"))
                 except OSError:
                     continue
-                sidecar_path = path.with_name(path.name.replace(".speakers.txt", ".diarization.json"))
                 try:
                     sidecar = json.loads(sidecar_path.read_text())
                 except (OSError, ValueError):
