@@ -495,13 +495,19 @@ def test_items_paging(ws: Path, fake: FakeRunner) -> None:
     out = mcp_server.whosaid_items()
     check([r["id"] for r in out["items"]] == ["AI-4", "AI-5a", "AI-5b"], f"tie-breaker: {out['items']}")
 
-    # compact: exactly the six keys, evidence availability is the occurrences count
+    # Compact keeps extraction type, obligation kind and completion evidence distinct.
     fake.queue.append((list(shuffled), None))
     out = mcp_server.whosaid_items(compact=True, limit=3)
-    check(out["compact"] is True and all(set(r) == {"id", "text", "type", "owner", "status", "occurrences"}
+    check(out["compact"] is True and all(set(r) == set(mcp_server._ITEMS_COMPACT_KEYS)
                                          for r in out["items"]), f"compact keys: {out['items'][0]}")
     check(out["items"][0]["id"] == "AI-001" and out["items"][0]["occurrences"] == rows[0]["occurrences"],
           f"compact row values: {out['items'][0]}")
+
+    fake.queue.append((list(shuffled), None))
+    out = mcp_server.whosaid_items(offset=50)
+    check(out["count"] == 50 and out["limit"] == 50 and out["next_offset"] == 100,
+          f"an offset-only page remains bounded: {out['count']}")
+    check([r["id"] for r in out["items"]] == expect[50:100], "offset-only page follows the first page")
 
     # filters go to the CLI before paging; paging args never do
     fake.queue.append((list(shuffled), None))
@@ -555,7 +561,7 @@ def test_worklist_paging(ws: Path, fake: FakeRunner) -> None:
     fake.queue.append((payload, None))
     out = mcp_server.whosaid_worklist(offset=4)
     check([it["id"] for it in out["items"]] == ["CM-004", "CM-005"] and "omitted" not in out and out["limit"] == 50,
-          f"offset alone keeps the default cap: {out}")
+          f"offset alone uses the default cap: {out}")
     fake.queue.append((payload, None))
     out = mcp_server.whosaid_worklist(offset=6)
     check(out["items"] == [] and out["count"] == 0 and out["total"] == 6 and "omitted" not in out,
@@ -564,7 +570,7 @@ def test_worklist_paging(ws: Path, fake: FakeRunner) -> None:
     # compact drops the verbose keys
     fake.queue.append((payload, None))
     out = mcp_server.whosaid_worklist(limit=1, compact=True)
-    check(out["compact"] is True and set(out["items"][0]) == {"id", "source", "text", "tier", "score", "why"},
+    check(out["compact"] is True and set(out["items"][0]) == set(mcp_server._WORKLIST_COMPACT_KEYS),
           f"compact item keys: {out['items'][0]}")
     check("first_seen" not in json.dumps(out["items"]), f"compact drops the verbose fields: {out['items']}")
 
@@ -579,6 +585,12 @@ def test_worklist_paging(ws: Path, fake: FakeRunner) -> None:
     check(out["items"][0]["id"] == "CM-000" and out["items"][-1]["id"] == "CM-049",
           "the cap keeps the top of the ranking")
 
+    big["items"] *= 3
+    fake.queue.append((big, None))
+    out = mcp_server.whosaid_worklist(offset=50)
+    check(out["count"] == 50 and out["next_offset"] == 100 and out["omitted"] == 80,
+          f"later worklist pages are also bounded: {out['count']}")
+
     # invalid params: clean error dicts, never reaching the runner
     before = len(fake.calls)
     out = mcp_server.whosaid_worklist(tier="urgent")
@@ -588,6 +600,196 @@ def test_worklist_paging(ws: Path, fake: FakeRunner) -> None:
     out = mcp_server.whosaid_worklist(offset=-3)
     check(out["ok"] is False and "offset" in out["error"], f"negative offset: {out}")
     check(len(fake.calls) == before, "invalid params never reach the runner")
+
+
+def test_tracking_filters(ws: Path, fake: FakeRunner) -> None:
+    """Filters, counts and compact evidence survive the MCP boundary."""
+    w = str(ws.resolve())
+    accepted = {"id": "CM-001", "text": "Send a checklist", "status": "partial",
+                "kind": "explicit_commitment", "accepted_owner": "Alice_Example",
+                "evidence_available": True, "remaining_milestones": ["CM-001-publish"],
+                "tier": "P1", "milestones": [{"id": "CM-001-publish", "text": "Publish it"}]}
+    rows = [accepted, dict(accepted, id="CM-002", accepted_owner=None, kind="request"),
+            dict(accepted, id="CM-003", status="delivered")]
+    fake.queue.append(({"items": rows, "owner": "Alice_Example"}, None))
+    out = mcp_server.whosaid_worklist(kind="explicit_commitment", status="partial",
+                                    accepted_only=True, as_of="2026-01-06", compact=True, limit=1)
+    check(fake.last()[1] == ["worklist", w, "--owner", "me", "--kind", "explicit_commitment",
+                            "--status", "partial", "--as-of", "2026-01-06", "--accepted-only"],
+          f"worklist tracking flags reach the CLI: {fake.last()}")
+    check(out["total"] == 1 and out["kind_counts"] == {"explicit_commitment": 1}
+          and out["status_counts"] == {"partial": 1} and out["accepted_count"] == 1,
+          f"filtered counts are before paging: {out}")
+    check(out["items"][0]["remaining_milestones"] == ["CM-001-publish"]
+          and out["items"][0]["evidence_available"] is True and "milestones" not in out["items"][0],
+          f"compact preserves evidence and remaining work: {out['items']}")
+
+    fake.queue.append(([dict(accepted, id="AI-001"), dict(accepted, id="AI-002")], None))
+    out = mcp_server.whosaid_items(kind="explicit_commitment", accepted_only=True,
+                                 status="partial", as_of="2026-01-06", compact=True, limit=1)
+    check(fake.last()[1] == ["items", w, "--status", "partial", "--kind", "explicit_commitment",
+                            "--as-of", "2026-01-06", "--accepted-only"], f"items flags: {fake.last()}")
+    check(out["total"] == 2 and out["count"] == 1 and out["accepted_count"] == 2
+          and out["evidence_available_count"] == 2, f"item counts describe all matches: {out}")
+    check(out["items"][0]["kind"] == "explicit_commitment"
+          and out["items"][0]["accepted_owner"] == "Alice_Example", f"compact distinctions: {out}")
+
+    fake.queue.append(({}, None))
+    mcp_server.whosaid_person("Alice_Example", as_of="2026-01-06")
+    check(fake.last()[1] == ["person", w, "Alice_Example", "--as-of", "2026-01-06"], "person date forwarded")
+    fake.queue.append(({}, None))
+    mcp_server.whosaid_item("AI-001", as_of="2026-01-06")
+    check(fake.last()[1] == ["item", w, "AI-001", "--as-of", "2026-01-06"], "item date forwarded")
+    before = len(fake.calls)
+    for fn, args in ((mcp_server.whosaid_items, {"kind": "todo"}),
+                     (mcp_server.whosaid_worklist, {"as_of": "2026-02-31"}),
+                     (mcp_server.whosaid_person, {"as_of": "2026-01-06"}),
+                     (mcp_server.whosaid_item, {"id": "CM-001", "as_of": "yesterday"})):
+        out = fn(**args)
+        check(not out["ok"] and out.get("category") == "invalid_arguments", f"structured argument error: {out}")
+    check(len(fake.calls) == before, "invalid tracking filters do not invoke subprocesses")
+
+
+def test_tracking_reads_and_cache(tmp: Path, fake: FakeRunner) -> None:
+    """A real synthetic ledger proves temporal reads and cache invalidation."""
+    import tracking
+    import workspace
+    ws = make_workspace(tmp / "tracking")
+    (ws / "_commitments.json").write_text(json.dumps({"items": [{
+        "id": "CM-001", "speaker": "Alice_Example", "text": "I will send the checklist.",
+        "status": "done", "first_seen": "2026-01-01", "occurrences": []}]}))
+    evidence = {"kind": "manual", "ref": "fixture:reviewed-note"}
+    tracking.record_events(ws, [
+        {"item_id": "CM-001", "type": "status", "occurred_at": "2026-01-01",
+         "status": "open", "evidence": evidence},
+        {"item_id": "CM-001", "type": "milestones", "occurred_at": "2026-01-02",
+         "milestones": [{"id": "M-001", "text": "Draft checklist", "acceptance": "Draft shared"},
+                        {"id": "M-002", "text": "Publish checklist", "acceptance": "Published link"}],
+         "evidence": evidence},
+        {"item_id": "M-001", "type": "status", "occurred_at": "2026-01-03",
+         "status": "delivered", "evidence": evidence},
+        {"item_id": "M-002", "type": "status", "occurred_at": "2026-01-05",
+         "status": "delivered", "evidence": evidence},
+        {"item_id": "CM-001", "type": "priority", "occurred_at": "2026-01-02",
+         "speaker": "Bob_Example", "scope": "planning", "text": "Checklist first", "rank": 1,
+         "state": "active", "evidence": evidence},
+        {"item_id": "CM-001", "type": "priority", "occurred_at": "2026-01-05",
+         "speaker": "Bob_Example", "scope": "planning", "text": "Checklist can wait", "rank": 2,
+         "state": "deferred", "evidence": evidence},
+    ])
+    before = {p.name: p.read_bytes() for p in ws.iterdir() if p.is_file()}
+    calls = len(fake.calls)
+    out = mcp_server.whosaid_item("CM-001", workspace=str(ws), as_of="2026-01-03")
+    check(out["ok"] and out["item"]["status"] == "partial"
+          and out["item"]["remaining_milestones"] == ["M-002"], f"CM historical milestones: {out}")
+    out = mcp_server.whosaid_item("CM-001", workspace=str(ws))
+    check(out["item"]["status"] == "delivered" and out["item"]["evidence_available"], f"CM current evidence: {out}")
+    out = mcp_server.whosaid_item("CM-001", workspace=str(ws), as_of="2025-12-31")
+    check(out.get("category") == "not_found", f"no item before its first occurrence: {out}")
+    out = mcp_server.whosaid_priorities(group="leadership", workspace=str(ws), as_of="2026-01-03")
+    check(out["ok"] and out["members"] == ["Bob_Example"] and out["count"] == 1
+          and out["items"][0]["rank"] == 1 and out["items"][0]["state"] == "active",
+          f"priority history as of date: {out}")
+    out = mcp_server.whosaid_priorities(group="leadership", workspace=str(ws))
+    check(out["items"][0]["state"] == "deferred" and len(out["history"]) == 2, f"latest priority: {out}")
+    out = mcp_server.whosaid_priorities(group="unknown", workspace=str(ws))
+    check(out.get("category") == "tracking_error", f"unknown group is structured: {out}")
+    check(len(fake.calls) == calls, "CM and priority reads use the shared local projection")
+    check(before == {p.name: p.read_bytes() for p in ws.iterdir() if p.is_file()}, "tracking reads never write")
+
+    cached_row = {"id": "CM-001", "kind": "explicit_commitment", "status": "delivered",
+                  "accepted_owner": "Alice_Example", "evidence_available": True}
+    cache = ws / "_WORKLIST-Alice_Example.json"
+    def save_cache(row):
+        cache.write_text(json.dumps({"owner": "Alice_Example", "items": [row],
+                                     "corpora": workspace.corpora_digests(ws)}))
+    save_cache(cached_row)
+    out = mcp_server.whosaid_worklist(workspace=str(ws), use_cache=True, accepted_only=True,
+                                    kind="explicit_commitment", status="delivered")
+    check(out["ok"] and not out["stale"] and out["accepted_count"] == 1, f"fresh tracking cache: {out}")
+    token = out["snapshot_token"]
+    ledger = ws / "_tracking.json"
+    old_stat = ledger.stat()
+    ledger.write_text(ledger.read_text() + "\n")
+    os.utime(ledger, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    out = mcp_server.whosaid_worklist(workspace=str(ws), use_cache=True)
+    check(out["stale"] and out["snapshot_token"] != token, "ledger content invalidates cache even with unchanged mtime")
+    save_cache(cached_row)
+    token = mcp_server._snapshot_token(ws)
+    config = ws / "whosaid.toml"
+    old_stat = config.stat()
+    config.write_text(config.read_text() + "\n# changed\n")
+    os.utime(config, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    out = mcp_server.whosaid_worklist(workspace=str(ws), use_cache=True)
+    check(out["stale"] and mcp_server._snapshot_token(ws) != token, "config content changes freshness and page snapshot")
+
+    out = mcp_server.whosaid_worklist(workspace=str(ws), use_cache=True, as_of="2026-01-03")
+    check(out.get("category") == "incompatible_cache", f"current cache cannot answer historical status: {out}")
+    fake.queue.append((None, {"ok": False, "category": "timeout", "error": "timed out", "phase": "rank", "hint": ""}))
+    out = mcp_server.whosaid_worklist(workspace=str(ws), as_of="2026-01-03")
+    check(out.get("category") == "timeout" and "cached" not in out
+          and out["cache_error"]["category"] == "incompatible_cache", f"historical timeout never attaches current state: {out}")
+    save_cache({"id": "CM-001", "status": "open"})
+    out = mcp_server.whosaid_worklist(workspace=str(ws), use_cache=True, accepted_only=True)
+    check(out.get("category") == "incompatible_cache", f"old extraction cache cannot assert accepted ownership: {out}")
+
+
+def test_tracking_suggestions(tmp: Path, fake: FakeRunner) -> None:
+    """Indexed completion text stays a review candidate, with quote/dedup guards."""
+    import sqlite3
+    ws = make_workspace(tmp / "suggestions")
+    out = mcp_server.whosaid_tracking_suggestions(workspace=str(ws))
+    check(out.get("category") == "missing_index", f"missing suggestion index: {out}")
+    items = [{"id": "CM-001", "speaker": "Alice_Example", "text": "I will send the project checklist.",
+              "status": "open", "first_seen": "2026-01-01", "occurrences": []},
+             {"id": "CM-002", "speaker": "Bob_Example", "text": "I will send the project checklist.",
+              "status": "open", "first_seen": "2026-01-01", "occurrences": []}]
+    (ws / "_commitments.json").write_text(json.dumps({"items": items}))
+    conn = sqlite3.connect(ws / "_search.db")
+    conn.execute("CREATE TABLE seg(meeting, source, speaker, t_sec, line, text)")
+    conn.execute("CREATE TABLE seg_message(rowid INTEGER PRIMARY KEY, message_id, attribution)")
+    turns = [
+        ("2026-01-03", "Alice_Example", "I sent the project checklist.", "msg-one", {}),
+        ("2026-01-04", "Alice_Example", "I sent the project checklist.", "msg-one", {}),
+        ("2026-01-04", "Alice_Example", "I sent the project checklist.", "msg-quote", {"quoted": True}),
+        ("2026-01-04", "Alice_Example", "I sent the project checklist.", "msg-uncertain", {"attribution_uncertain": True}),
+        ("2026-01-04", "Alice_Example", "I have not sent the project checklist.", "msg-negative", {}),
+        ("2026-01-04", "Alice_Example", "I will send the project checklist.", "msg-future", {}),
+        ("2026-01-04", "Bob_Example", "I sent the project checklist.", "msg-other", {}),
+    ]
+    for n, (meeting, speaker, text, message_id, attribution) in enumerate(turns, 1):
+        conn.execute("INSERT INTO seg VALUES (?,?,?,?,?,?)", (meeting, "chat.speakers.txt", speaker, n, n, text))
+        conn.execute("INSERT INTO seg_message VALUES (?,?,?)", (n, message_id, json.dumps(attribution)))
+    conn.commit()
+    conn.close()
+    before = {p.name: p.read_bytes() for p in ws.iterdir() if p.is_file()}
+    calls = len(fake.calls)
+    out = mcp_server.whosaid_tracking_suggestions(workspace=str(ws))
+    check(out["ok"] and out["owner"] == "Alice_Example" and out["count"] == 1,
+          f"one completion candidate for configured owner: {out}")
+    check(out["items"][0]["item_id"] == "CM-001" and out["items"][0]["review_required"]
+          and out["items"][0]["evidence"]["speaker"] == "Alice_Example", f"candidate preserves original speaker: {out}")
+    check(out["items_scanned"] == 1 and out["turns_scanned"] == 6 and out["turns_excluded"] == 3,
+          f"dedup and uncertain/quoted exclusions: {out}")
+    check(out["review_required"] and out["has_more"] is False and out["limitations"], "review and scope disclosed")
+    check(before == {p.name: p.read_bytes() for p in ws.iterdir() if p.is_file()}, "suggestions never write files")
+    check(len(fake.calls) == calls, "suggestions do not run remote or CLI calls")
+    import tracking
+    import time
+    real_suggest = tracking.suggest_evidence
+    def expire_during_match(items, turns, limit=100, *, deadline=None):
+        check(deadline is not None and deadline > time.monotonic(), "MCP passes an absolute future deadline to matcher")
+        return real_suggest(items, turns, limit, deadline=time.monotonic() - 1)
+    try:
+        tracking.suggest_evidence = expire_during_match
+        out = mcp_server.whosaid_tracking_suggestions(workspace=str(ws))
+    finally:
+        tracking.suggest_evidence = real_suggest
+    check(out.get("category") == "timeout" and out.get("phase") == "suggestions"
+          and 0 <= out["elapsed_s"] < 1, f"expired matcher deadline becomes a prompt structured timeout: {out}")
+    for limit in (0, 1001, True, "50"):
+        out = mcp_server.whosaid_tracking_suggestions(workspace=str(ws), limit=limit)
+        check(out.get("category") == "invalid_arguments", f"bounded suggestion limit {limit!r}: {out}")
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +947,7 @@ def test_worklist_diagnostics(tmp: Path) -> None:
         check("builds the corpora" not in out["hint"] and "large" in out["hint"], f"match-phase hint, no rebuild: {out}")
         check("cached" not in out and "no cached worklist" in out["hint"], f"no cache yet: {out}")
 
-        # the same timeout during prime/matcher points at Ollama / [search] embed instead
+        # prime/matcher timeouts describe source identity work, with no model dependency
         slow.write_text(
             "import sys, time\n"
             "print('whosaid: phase: prime ' + sys.argv[4], file=sys.stderr, flush=True)\n"
@@ -753,7 +955,7 @@ def test_worklist_diagnostics(tmp: Path) -> None:
         )
         out = mcp_server.whosaid_worklist(workspace=str(ws), owner="Alice_Example")
         check(out.get("category") == "timeout" and out.get("phase") == "prime Alice_Example", f"prime phase: {out}")
-        check("Ollama" in out["hint"] and "[search] embed" in out["hint"], f"prime-phase hint: {out}")
+        check("source identity" in out["hint"] and "do not call an embedding model" in out["hint"], f"prime-phase hint: {out}")
 
         # 3) timeout + a cache newer than both corpora: attached, stale false, sliced like a fresh result
         write_cache(ws, +60)
@@ -1163,7 +1365,7 @@ def test_registration() -> None:
     new_tools = {
         "whosaid_search", "whosaid_context", "whosaid_items", "whosaid_item", "whosaid_person",
         "whosaid_meetings", "whosaid_prs", "whosaid_speakers", "whosaid_workspace_status",
-        "whosaid_worklist",
+        "whosaid_worklist", "whosaid_priorities", "whosaid_tracking_suggestions",
     }
     if SDK == "stub":
         registered = set(mcp_server.mcp.tools)
@@ -1215,6 +1417,9 @@ def main() -> None:
             test_worklist_paging(ws, fake)
             test_list_paging(ws, fake)
             test_items_paging(ws, fake)
+            test_tracking_filters(ws, fake)
+            test_tracking_reads_and_cache(tmp, fake)
+            test_tracking_suggestions(tmp, fake)
 
             mcp_server._run_ws = real_runner
             clear_env()

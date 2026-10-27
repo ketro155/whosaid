@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Pinning test for the whosaid MCP server (frozen spec v1.2.0).
+Wire-schema and description contracts for the whosaid MCP server.
 
 Enumerates the tools actually registered on the `mcp` server object and asserts
 the load-bearing tool names, description substrings, description lengths, param
 enums, required-param sets, and readOnlyHint annotations. If any of these drift
-from the frozen spec, this test fails. The meeting-workspace tools and
+from the intended API, this test fails. The meeting-workspace tools and
 whosaid://workspace/... resources (GitHub issue #14) are pinned the same way;
 their behavior is covered offline by test/mcp_workspace_tools_test.py.
 
-v1.2.0 additions pinned here: whosaid_relabel's optional `roles` param, the
-"role(s)" description substrings on transcribe/relabel/list_speakers, and the
-roles + dev-commitments coverage in SERVER_INSTRUCTIONS. The tool-name SET
-stays the six v1.1.0 names.
+Includes tracking filters, historical reads, priority assertions, review-only
+evidence suggestions, bounded pagination and cache compatibility contracts.
 
 Run:
     uv run --with "mcp[cli]" python test/mcp_descriptions_test.py
@@ -75,6 +73,8 @@ def main() -> None:
         "whosaid_speakers",
         "whosaid_workspace_status",
         "whosaid_worklist",
+        "whosaid_priorities",
+        "whosaid_tracking_suggestions",
     }
     expected = {
         "whosaid_transcribe",
@@ -234,10 +234,11 @@ def main() -> None:
     check("GitHub issue #13" in d_person, "person desc must cite the per-owner commitments view")
     check("whosaid index" in d_status, "status desc must point at whosaid index")
     d_worklist = by_name["whosaid_worklist"].description or ""
-    check("GitHub issue #13" in d_worklist and "P1" in d_worklist and "_WORKLIST-" in d_worklist,
-          "worklist desc must cite issue #13, the tiers and the rendered file")
+    check("completed" in d_worklist and "P1" in d_worklist and "_WORKLIST-" in d_worklist,
+          "worklist desc must explain completed history, tiers and the cached file")
     wprops = dumps["whosaid_worklist"]["inputSchema"]["properties"]
-    check(set(wprops) == {"owner", "workspace", "tier", "limit", "offset", "compact", "use_cache"},
+    check(set(wprops) == {"owner", "workspace", "tier", "limit", "offset", "compact", "use_cache",
+                          "kind", "status", "accepted_only", "as_of"},
           f"worklist params: {sorted(wprops)}")
     check(wprops["use_cache"].get("default") is False, f"use_cache defaults off (#113): {wprops['use_cache']}")
     check(all(t in d_worklist for t in ("use_cache", "missing_corpora", "timeout", "stale", "_WORKLIST-<Owner>.json")),
@@ -245,7 +246,7 @@ def main() -> None:
     check(wprops["owner"].get("default") == "me", f"worklist owner default must be me: {wprops['owner']}")
     check(wprops["offset"].get("default") == 0 and wprops["compact"].get("default") is False,
           f"worklist paging defaults: offset={wprops.get('offset')} compact={wprops.get('compact')}")
-    check(all(p in d_worklist for p in ("tier", "limit", "offset", "compact")),
+    check(all(p in d_worklist.lower() for p in ("tier", "limit", "offset", "compact")),
           "worklist desc must document the tier/limit/offset/compact params")
     check(not dumps["whosaid_worklist"]["inputSchema"].get("required"), "worklist has no required params")
     check("whosaid_worklist" in (mcp_server.SERVER_INSTRUCTIONS or ""), "instructions must mention whosaid_worklist")
@@ -259,8 +260,43 @@ def main() -> None:
     cprops = dumps["whosaid_context"]["inputSchema"]["properties"]
     check(cprops["before"].get("default") == 60 and cprops["after"].get("default") == 120, "context window defaults 60/120")
     check(set(dumps["whosaid_item"]["inputSchema"].get("required", [])) == {"id"}, "item requires id")
-    check(set(dumps["whosaid_items"]["inputSchema"]["properties"]) == {"owner", "requester", "status", "type", "workspace", "limit", "offset", "compact"}, "items filters + paging")
+    check(set(dumps["whosaid_items"]["inputSchema"]["properties"])
+          == {"owner", "requester", "status", "type", "workspace", "limit", "offset", "compact",
+              "kind", "accepted_only", "as_of"}, "items filters + paging + historical reconciliation")
     check(set(dumps["whosaid_person"]["inputSchema"].get("required", [])) == set(), "person name is optional")
+    check(set(dumps["whosaid_person"]["inputSchema"]["properties"]) == {"name", "workspace", "as_of"},
+          "person exposes an optional historical date")
+    check(set(dumps["whosaid_item"]["inputSchema"]["properties"]) == {"id", "workspace", "as_of"},
+          "item exposes an optional historical date")
+    check("CM-NNN" in dumps["whosaid_item"]["description"], "item documents commitment IDs alongside action items")
+    for name in ("whosaid_items", "whosaid_worklist"):
+        schema = dumps[name]["inputSchema"]
+        props = schema["properties"]
+        check(props["accepted_only"].get("type") == "boolean"
+              and props["accepted_only"].get("default") is False, f"{name} acceptance filter defaults false")
+        check({"kind", "status", "accepted_only", "as_of"}.isdisjoint(schema.get("required", [])),
+              f"{name} tracking filters remain optional")
+        desc = dumps[name]["description"]
+        check(all(term in desc for term in ("explicit_commitment", "request", "standing_directive",
+                                           "suggestion", "inferred_next_step", "evidence_available", "snapshot_token")),
+              f"{name} documents obligation distinctions, evidence and snapshot identity")
+    check("incompatible_cache" in d_worklist and "Historical" in d_worklist and "live reconciliation" in d_worklist,
+          "worklist documents historical cache incompatibility")
+    p_schema = dumps["whosaid_priorities"]["inputSchema"]
+    check(set(p_schema["properties"]) == {"group", "as_of", "workspace"} and not p_schema.get("required"),
+          "priority group and historical filters are optional")
+    d_priorities = dumps["whosaid_priorities"]["description"]
+    check(all(term in d_priorities for term in ("group", "history", "evidence", "conflicts", "consensus")),
+          "priority description preserves provenance and conflicting assertions")
+    suggestion_schema = dumps["whosaid_tracking_suggestions"]["inputSchema"]
+    suggestion_props = suggestion_schema["properties"]
+    check(set(suggestion_props) == {"owner", "limit", "workspace"} and not suggestion_schema.get("required"),
+          "suggestions only require configured workspace context")
+    check(suggestion_props["owner"].get("default") == "me"
+          and suggestion_props["limit"].get("default") == 50, "suggestion owner/limit defaults")
+    d_suggestions = dumps["whosaid_tracking_suggestions"]["description"]
+    check(all(term in d_suggestions for term in ("1000", "review_required", "never update status", "no LLM")),
+          "suggestions are bounded, unapproved and read-only")
     check(set(dumps["whosaid_workspace_status"]["inputSchema"]["properties"]) == {"workspace"}, "workspace_status takes only workspace")
     for name in ("whosaid_prs", "whosaid_speakers"):
         check(set(dumps[name]["inputSchema"]["properties"]) == {"workspace", "limit", "offset"}, f"{name} pages")
@@ -290,6 +326,9 @@ def main() -> None:
     check("Meeting workspace" in instr, "instructions must have a 'Meeting workspace' paragraph")
     check("WHOSAID_WORKSPACE" in instr and "whosaid index" in instr, "instructions must name the env var and the index command")
     check("whosaid_search" in instr and "whosaid_context" in instr, "instructions must describe search -> context")
+    check(all(term in instr for term in ("accepted_owner", "whosaid_priorities", "whosaid_tracking_suggestions",
+                                        "Historical as_of queries cannot use a current cache")),
+          "instructions describe accepted obligations, priorities, suggestions and historical cache limits")
 
     # --- workspace resources: static URIs + {folder} templates, under this SDK major ---
     resources = {str(r.uri) for r in asyncio.run(mcp_server.mcp.list_resources())}

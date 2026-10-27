@@ -19,6 +19,7 @@ sends transcript text to Anthropic when ingest drafts action items.)
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -201,7 +202,9 @@ Typical workflow: whosaid_transcribe -> read the speaker cards in the result -> 
 
 Speakers can carry role tags (self/boss/peer/report/external) set via whosaid_relabel's `roles` param; roles appear in speaker cards and transcripts and tell you whose commitments matter most (boss ranks higher). "self" is the user's own voice.
 
-Dev-commitments = the cross-meeting corpus of commitments the self-roled speaker made to others/team. Extracted per-meeting into commitments.md/commitments.json (via `python3 lib/workspace.py commitments --transcript T --json-out F`, or `whosaid ingest --commitments`), then rolled up into _COMMITMENTS.md/_commitments.json with stable CM-NNN ids. whosaid_worklist(owner="me") answers "what did I sign up for, ranked": the owner's commitments plus the action items they own, tiered P1/P2/P3 (boss-requested, blocking or deadline cues, repeat across meetings, recency, cue strength) with a score and why strings; the same view the roll-up writes to _WORKLIST-<Owner>.md (the tool takes tier/limit/offset/compact and caps every page at 50 unless given an explicit limit). If it times out, do not retry the same call: read the error's category/phase/hint, and use the attached `cached` result or call again with use_cache=true (it reports stale and generated_at).
+Dev-commitments = the cross-meeting corpus of commitments the self-roled speaker made to others/team. Extracted per-meeting into commitments.md/commitments.json (via `python3 lib/workspace.py commitments --transcript T --json-out F`, or `whosaid ingest --commitments`), then rolled up into _COMMITMENTS.md/_commitments.json with stable CM-NNN ids. whosaid_worklist(owner="me") ranks the owner's commitments plus the action items they own with P1/P2/P3, a score and why strings. These are heuristic ranks, distinct from leadership's stated priorities. Filter by kind, status or accepted_only before paging; an omitted limit caps every page at 50. If it times out, read the error's category/phase/hint; a compatible cached current result may be attached with stale and generated_at. Historical as_of queries cannot use a current cache.
+
+Commitment tracking: kind distinguishes explicit promises, requests, standing directives, suggestions and inferred next steps. An extracted owner does not establish acceptance; accepted_owner and acceptance_evidence make that distinction. Items and worklists include completed history, evidence and remaining milestones. as_of reconciles recorded event time, not what was known at that time. whosaid_priorities(group="leadership") reads the configured group's recorded assertions, priority changes and conflicts. whosaid_tracking_suggestions(owner="me") finds later indexed statements that could show completion; every suggestion requires review and none changes the tracking ledger. Use whosaid_item for AI-NNN or CM-NNN evidence detail.
 
 Not exposed here: `enroll` and `record` are interactive microphone operations that need a live terminal. Run them from the `whosaid` CLI. The first transcribe downloads ~1.5 GB of models; run whosaid_doctor to check readiness. Full flag/env/long-audio reference: read the whosaid://guide resource.
 
@@ -1120,7 +1123,6 @@ MEETING_ACTION_ITEMS = "action-items.md"  # per-meeting file written by `whosaid
 
 _SEARCH_MODES = ("exact", "meaning", "hybrid")
 _AT_RE = re.compile(r"^[0-9]{1,3}:[0-9]{2}(:[0-9]{2})?$")  # MM:SS or HH:MM:SS
-_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")  # e.g. AI-042
 _MAX_K = 100
 _MAX_WINDOW = 3600  # seconds of context either side; more than that is "read the transcript"
 _WORKLIST_TIERS = ("P1", "P2", "P3")
@@ -1128,14 +1130,15 @@ _WORKLIST_TIERS = ("P1", "P2", "P3")
 # token limit, so omitting limit caps every page at N, including when offset is set,
 # reporting the rest via "omitted"/"hint" instead of dumping everything.
 _WORKLIST_DEFAULT_LIMIT = 50
-_WORKLIST_COMPACT_KEYS = ("id", "source", "text", "tier", "score", "why")
+_WORKLIST_COMPACT_KEYS = ("id", "source", "text", "status", "kind", "accepted_owner",
+                          "evidence_available", "remaining_milestones", "tier", "score", "why")
 # GitHub issue #90: a ~300-entry workspace made whosaid_meetings ~82k chars, past the
 # same limit, so the list tools page the same way (newest meetings first).
 _LIST_DEFAULT_LIMIT = 50
 _MEETINGS_COMPACT_KEYS = ("folder", "kind", "created", "minutes")
-# GitHub issue #112: whosaid_items pages the same way; "type" is the issue's "kind" and
-# "occurrences" (recorded meeting count) is evidence availability (full detail: whosaid_item).
-_ITEMS_COMPACT_KEYS = ("id", "text", "type", "owner", "status", "occurrences")
+# Extraction type, obligation kind, and evidence availability are distinct fields.
+_ITEMS_COMPACT_KEYS = ("id", "text", "type", "owner", "status", "kind", "accepted_owner",
+                       "evidence_available", "occurrences")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -1294,20 +1297,23 @@ _DESC_WS_CONTEXT = (
 
 _DESC_WS_ITEMS = (
     "List action items from the workspace's entity graph, filtered by `owner`, `requester`, "
-    "`status` or `type`. Each item carries its id (AI-NNN), text, owner, status and the "
-    "meetings it was raised in; whosaid_item has the full history. Sorted by numeric id; "
-    "filters apply before paging. Omitting `limit` caps every page at 50, even with `offset`, "
-    "reporting `total`, `omitted` and `next_offset`; pass `offset=next_offset` (and "
-    "an explicit `limit` for another page size). `compact=true` trims each item to id, text, type, "
-    "owner, status and occurrences (the count of meetings with evidence). Paging is over the "
-    "current index snapshot: every response carries `index_mtime`, and if it differs between "
-    "pages the index was rebuilt, so restart from offset 0. Built by `whosaid index`; "
+    "`status`, extraction `type`, obligation `kind`, or `accepted_only`. Kinds: "
+    "explicit_commitment, request, standing_directive, suggestion, inferred_next_step. "
+    "as_of accepts an ISO date/time to reconcile historical evidence. Each item carries "
+    "AI-NNN id, text, status, attribution and evidence; whosaid_item has full history. "
+    "Sorted by numeric id; filters and kind/status counts apply before paging. An omitted "
+    "limit always caps at 50, including later pages; follow next_offset. compact=true "
+    "keeps id, text, type, owner, status, kind, accepted_owner, evidence_available and "
+    "occurrences. Responses carry index_mtime and snapshot_token; restart from offset 0 "
+    "if snapshot_token changes between pages (index, corpora, tracking or config changed). "
+    "Built by `whosaid index`; "
     "read-only. Keywords: action items, todos, commitments, who owes what, open items, "
     "follow-ups."
 )
 
 _DESC_WS_ITEM = (
-    "One action item by id (AI-NNN) with its full history: every meeting it came up in, the "
+    "One action item or commitment by id (AI-NNN or CM-NNN) with its tracking history, "
+    "evidence and milestones. as_of accepts an ISO date/time. Action items also include the "
     "timestamped turns where it was discussed, commitments and status changes, related PRs. "
     "Use whosaid_context on those timestamps for the verbatim discussion. Read-only."
 )
@@ -1316,7 +1322,8 @@ _DESC_WS_PERSON = (
     "Per-person commitments view (GitHub issue #13): what `name` owns, what they asked "
     "others for, deadlines they gave, and the meetings they were in. Omit `name` to list "
     "every known person with counts. Names are speaker labels exactly as they appear in the "
-    "transcripts (see whosaid_speakers). Read-only. Keywords: my action items, what does X "
+    "transcripts (see whosaid_speakers). With name, as_of accepts an ISO date/time for "
+    "historical reconciliation. Read-only. Keywords: my action items, what does X "
     "owe, commitments by person, who promised what."
 )
 
@@ -1330,45 +1337,56 @@ _DESC_WS_MEETINGS = (
     "whosaid://workspace/meeting/{folder}/... resources use. Newest first. Filter with kind, "
     "since/until (YYYY-MM-DD, inclusive, on the meeting date) and query (case-insensitive "
     "substring of folder or source name), then page with offset (skip N) and limit (top N); "
-    "compact=true keeps only folder, kind, created and minutes. Omitting limit caps every "
-    "page at 50, even with offset; set limit for another size. Read-only."
+    "compact=true keeps only folder, kind, created and minutes. An omitted limit always "
+    "caps the page at 50 plus total/omitted and a paging hint. Read-only."
 )
 
 _DESC_WS_PRS = (
     "List pull-request mentions found in the transcripts: PR numbers or links, who mentioned "
     "them, in which meeting and when. Read-only. Keywords: PR, pull request, code review, "
-    "merged, deployed. Omitting limit caps every page at 50, even with offset; set limit "
-    "for another size. Replies include total/omitted and a paging hint."
+    "merged, deployed. Page with offset/limit; an omitted limit caps every page at 50 plus "
+    "total/omitted and a paging hint."
 )
 
 _DESC_WS_SPEAKERS = (
     "List every speaker label in the search index with turn counts and the meetings they "
     "appear in. Use the exact labels as the `speaker` filter of whosaid_search or the `name` "
-    "of whosaid_person. Busiest first; omitting limit caps every page at 50, even with "
-    "offset; set limit for another size. Replies include total/omitted and a paging hint. Read-only."
+    "of whosaid_person. Busiest first; page with offset/limit; an omitted limit always caps "
+    "the page at 50 plus total/omitted and a paging hint. Read-only."
 )
 
 _DESC_WS_WORKLIST = (
-    "Ranked personal worklist (GitHub issue #13): what `owner` signed up for across every "
-    "meeting, from the roll-up corpora (dev-commitments CM-NNN plus the action items AI-NNN "
-    "they own), each item tiered P1/P2/P3 with a numeric score and short why strings. "
-    "P1 = boss-requested, a blocking/urgency cue, a deadline cue, or seen in 3+ meetings; "
-    "P2 = seen in 2 meetings, requested by anyone, or a strong cue in the latest meeting; "
-    "P3 = the rest; negated items are never P1. owner is a speaker label or 'me' (the "
-    "self-roled speaker, else the whosaid.toml [workspace] owner). Filter and page with "
-    "tier (P1/P2/P3, case-insensitive) first, then offset (skip N), then limit (top N); "
-    "compact=true keeps only id, source, text, tier, score and why per item; a call with "
-    "an omitted limit returns at most 50 per page, even with offset; set limit for another size. Replies "
-    "include total/omitted/next_offset (GitHub issue #30). Deterministic, no LLM, "
-    "same view as _WORKLIST-<Owner>.md. Errors carry a category (GitHub issue #113): "
-    "missing_corpora (neither corpus exists; the only case that says to run the roll-up), "
-    "timeout (with elapsed_s, the phase it was in and a hint for that phase, plus the "
-    "cached result as `cached` with generated_at and stale when one exists), exit_<code>, "
-    "bad_json, no_cache. use_cache=true returns the cached worklist the roll-up writes to "
-    "_WORKLIST-<Owner>.json (source=cache, generated_at, stale = the corpora changed since) "
-    "without running the ranking; use it after a timeout instead of retrying the same "
-    "call. Read-only. Keywords: my worklist, what did I "
-    "promise, what did I sign up for, my priorities, ranked commitments."
+    "Ranked personal worklist from commitment CM-NNN and action-item AI-NNN corpora, "
+    "including completed items and proposed requests. owner is a speaker label or 'me' "
+    "(self role, else whosaid.toml owner). Distinguish obligations with kind "
+    "(explicit_commitment, request, standing_directive, suggestion, inferred_next_step) "
+    "and accepted_only. Filter by status and tier (P1/P2/P3) before paging; kind/status "
+    "counts describe that filtered set. as_of accepts an ISO date/time. Offset skips rows; "
+    "omitted limit always caps at 50. compact=true keeps id, source, text, status, kind, "
+    "accepted_owner, evidence_available, remaining_milestones, tier, score and why. "
+    "Deterministic, no LLM. Ranking is a heuristic; leadership assertions are available "
+    "through whosaid_priorities. Errors have categories: missing_corpora, timeout "
+    "(elapsed_s and phase), exit_<code>, bad_json, no_cache, incompatible_cache. "
+    "use_cache=true reads _WORKLIST-<Owner>.json with generated_at, source=cache, stale "
+    "and snapshot_token; freshness includes corpus, tracking and config changes. Historical "
+    "as_of queries require live reconciliation and reject cached results. Timeouts may "
+    "attach a compatible current cache. Read-only. Keywords: my worklist, what did I "
+    "promise, my commitments, completed work, ranked priorities."
+)
+_DESC_WS_PRIORITIES = (
+    "Read priority assertions and their changes from the local tracking ledger. Filter "
+    "by a configured group such as leadership and/or ISO date/time as_of. Returns group "
+    "members, current assertions, history, evidence and conflicts. Explicit priorities "
+    "remain separate from inferred ranks and differing speakers' assertions; no official "
+    "consensus is invented. Read-only; no priority is inferred from role or meeting count."
+)
+_DESC_WS_TRACKING_SUGGESTIONS = (
+    "Find possible completion evidence for an owner's open commitments in the local "
+    "transcript index. owner defaults to me; limit defaults to 50 and is capped at 1000. "
+    "Uses later owner statements with matching subjects and completed-action wording; "
+    "skips quoted or uncertain attribution and repeated indexed messages. Returns evidence "
+    "candidates marked review_required, counts and limitations. Suggestions are not verified "
+    "completion and never update status or the tracking ledger. Read-only; no LLM or external calls."
 )
 _DESC_WS_STATUS = (
     "Read-only health check for a meeting workspace: whether the search index (_search.db) "
@@ -1493,6 +1511,49 @@ def _item_num(item_id) -> int:
     return int(m.group(1)) if m else sys.maxsize
 
 
+def _tracking_args(kind: Optional[str] = None, as_of: Optional[str] = None) -> Optional[dict]:
+    """Reject unsupported filters before a subprocess or ledger read."""
+    import obligations
+    import tracking
+    if kind is not None and kind not in obligations.KINDS:
+        return _ws_error(f"unknown obligation kind: {kind}",
+                         "use one of: " + ", ".join(obligations.KINDS), category="invalid_arguments")
+    if as_of is not None:
+        try:
+            tracking._instant(as_of, end_of_day=True)
+        except (ValueError, TypeError) as exc:
+            return _ws_error(str(exc), "pass as_of as an ISO date or timestamp",
+                             category="invalid_arguments")
+    return None
+
+
+def _item_counts(items: list[dict]) -> dict:
+    """Counts cover the filtered set, before pagination."""
+    from collections import Counter
+    return {
+        "kind_counts": dict(Counter(i.get("kind") or "unknown" for i in items)),
+        "status_counts": dict(Counter(i.get("status") or "unknown" for i in items)),
+        "accepted_count": sum(bool(i.get("accepted_owner")) for i in items),
+        "evidence_available_count": sum(bool(i.get("evidence_available")) for i in items),
+    }
+
+
+def _snapshot_token(ws: Path) -> Optional[str]:
+    """Identify the index and all inputs to the read-only tracking overlays."""
+    import workspace as wsmod
+    try:
+        inputs = wsmod.corpora_digests(ws)
+        db = wsconfig.search_db(ws)
+        for path in (db, Path(str(db) + "-wal")):
+            if path.is_file():
+                stat = path.stat()
+                inputs[path.name] = f"{stat.st_size}:{stat.st_mtime_ns}"
+        return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    except OSError:
+        # A transient file replacement must not turn a successful query into a crash.
+        return None
+
+
 @mcp.tool(name="whosaid_items", description=_DESC_WS_ITEMS, annotations=_read_only())
 def whosaid_items(
     owner: Optional[str] = None,
@@ -1503,14 +1564,14 @@ def whosaid_items(
     limit: Optional[int] = None,
     offset: int = 0,
     compact: bool = False,
+    kind: Optional[str] = None,
+    accepted_only: bool = False,
+    as_of: Optional[str] = None,
 ) -> dict:
-    """Shell `graph.py items <ws> [--owner ..] [--requester ..] [--status ..] [--type ..] --json`
-    and return {"ok", "items": [...], "count", "total", "index_mtime"} paged like
-    whosaid_meetings (GitHub issue #112): filters run in the CLI first, then rows are sorted
-    by (numeric id suffix, id), offset skips and limit caps; without an explicit limit,
-    every page self-caps at _LIST_DEFAULT_LIMIT. "omitted"/"next_offset"/"hint" appear while rows remain.
-    "index_mtime" is the search index file's mtime (ISO-8601 UTC, null if absent): offsets are
-    over the current snapshot, so if it differs between pages restart from offset 0.
+    """Filter through graph.py, count matches, sort numeric IDs and page them.
+
+    Omitted limits cap every page at 50. snapshot_token covers the index and
+    corpus/tracking/config inputs; consumers restart paging if that token changes.
     """
     ws, err = _resolve_ws(workspace)
     if err:
@@ -1518,10 +1579,16 @@ def whosaid_items(
     limit, offset, err = _page_args(limit, offset)
     if err:
         return err
+    err = _tracking_args(kind, as_of)
+    if err:
+        return err
     args = ["items", ws]
-    for flag, value in (("--owner", owner), ("--requester", requester), ("--status", status), ("--type", type)):
+    for flag, value in (("--owner", owner), ("--requester", requester), ("--status", status),
+                        ("--type", type), ("--kind", kind), ("--as-of", as_of)):
         if value is not None and str(value).strip():
             args += [flag, str(value).strip()]
+    if accepted_only:
+        args += ["--accepted-only"]
     payload, err = _run_ws(GRAPH_PY, args, ws)
     if err:
         return err
@@ -1532,7 +1599,9 @@ def whosaid_items(
         mtime = datetime.fromtimestamp(wsconfig.search_db(ws).stat().st_mtime, timezone.utc).isoformat()
     except OSError:
         mtime = None
-    out = _paged({"ok": True, "workspace": str(ws), "index_mtime": mtime}, "items", items, limit, offset)
+    out = _paged({"ok": True, "workspace": str(ws), "index_mtime": mtime,
+                  "snapshot_token": _snapshot_token(ws), "as_of": as_of,
+                  **_item_counts(items)}, "items", items, limit, offset)
     if compact:
         out["items"] = [{k: i.get(k) for k in _ITEMS_COMPACT_KEYS} for i in out["items"]]
         out["compact"] = True
@@ -1546,18 +1615,38 @@ def whosaid_items(
 def whosaid_item(
     id: str,  # noqa: A002 - the MCP-facing name; the AI-NNN id from whosaid_items
     workspace: Optional[str] = None,
+    as_of: Optional[str] = None,
 ) -> dict:
-    """Shell `graph.py item <ws> <id> --json` and return {"ok", "id", "item": {...}}."""
+    """Read AI detail from graph.py or CM detail through the shared corpus projection."""
     ws, err = _resolve_ws(workspace)
     if err:
         return err
     item_id = (id or "").strip()
-    if not _ITEM_ID_RE.match(item_id):
-        return _ws_error(f"invalid item id '{id}'", "pass an id such as AI-042 (from whosaid_items)")
-    payload, err = _run_ws(GRAPH_PY, ["item", ws, item_id], ws)
+    if not re.fullmatch(r"(?:AI|CM)-\d{3,}", item_id):
+        return _ws_error(f"invalid item id '{id}'", "pass AI-NNN or CM-NNN from items or worklist",
+                         category="invalid_arguments")
+    err = _tracking_args(as_of=as_of)
     if err:
         return err
-    return {"ok": True, "workspace": str(ws), "id": item_id, "item": payload}
+    if item_id.startswith("CM-"):
+        import commitment_views
+        try:
+            row = commitment_views.corpus_rows(ws).get(item_id)
+            rows = commitment_views.enrich_rows(ws, [row], as_of=as_of) if row else []
+        except (OSError, ValueError, TypeError) as exc:
+            return _ws_error(str(exc), "check the commitment corpus and tracking ledger",
+                             category="tracking_error")
+        if not rows:
+            return _ws_error(f"item {item_id} not found for the selected date",
+                             "pass an item id returned by whosaid_worklist for that date",
+                             category="not_found")
+        payload = rows[0]
+    else:
+        args = ["item", ws, item_id] + (["--as-of", as_of] if as_of else [])
+        payload, err = _run_ws(GRAPH_PY, args, ws)
+        if err:
+            return err
+    return {"ok": True, "workspace": str(ws), "id": item_id, "item": payload, "as_of": as_of}
 
 
 # ---------------------------------------------------------------------------
@@ -1567,6 +1656,7 @@ def whosaid_item(
 def whosaid_person(
     name: Optional[str] = None,
     workspace: Optional[str] = None,
+    as_of: Optional[str] = None,
 ) -> dict:
     """Shell `graph.py person <ws> [Name] --json`.
 
@@ -1577,12 +1667,20 @@ def whosaid_person(
     if err:
         return err
     who = (name or "").strip()
+    err = _tracking_args(as_of=as_of)
+    if err:
+        return err
+    if as_of and not who:
+        return _ws_error("historical person view requires a name", "pass name=<speaker label> with as_of",
+                         category="invalid_arguments")
     args = ["person", ws] + ([who] if who else [])
+    if as_of:
+        args += ["--as-of", as_of]
     payload, err = _run_ws(GRAPH_PY, args, ws)
     if err:
         return err
     if who:
-        return {"ok": True, "workspace": str(ws), "name": who, "person": payload}
+        return {"ok": True, "workspace": str(ws), "name": who, "person": payload, "as_of": as_of}
     people = _as_list(payload, "people")
     return {"ok": True, "workspace": str(ws), "people": people, "count": len(people)}
 
@@ -1777,44 +1875,50 @@ def _iso_mtime(ts: float) -> str:
 
 
 def _worklist_view(ws: Path, who: str, data: dict, tier: Optional[str], limit: Optional[int],
-                   offset: int, compact: bool) -> dict:
+                   offset: int, compact: bool, kind: Optional[str] = None,
+                   status: Optional[str] = None, accepted_only: bool = False,
+                   as_of: Optional[str] = None) -> dict:
     """One worklist payload filtered and paged the way the tool documents:
-    tier first, then offset, then limit (default cap whenever limit is omitted),
+    filters first, then offset, then limit (default cap whenever omitted),
     then compact. Shared by the live, cached and use_cache answers."""
-    items = data.get("items") if isinstance(data.get("items"), list) else []
+    import commitment_views
+    items = [i for i in data.get("items", []) if isinstance(i, dict)] if isinstance(data.get("items"), list) else []
     if tier is not None:
-        items = [it for it in items if isinstance(it, dict) and str(it.get("tier", "")).upper() == tier]
-    total = len(items)
-    if limit is None:
-        limit = _WORKLIST_DEFAULT_LIMIT  # self-limiting default (GitHub issue #30)
-    items = items[offset:]
-    if limit is not None:
-        items = items[:limit]
-    if compact:
-        items = [{k: it.get(k) for k in _WORKLIST_COMPACT_KEYS} for it in items]
-    out = {
+        items = [it for it in items if str(it.get("tier", "")).upper() == tier]
+    items = commitment_views.filter_rows(items, kind=kind, status=status, accepted_only=accepted_only)
+    out = _paged({
         "ok": True,
         "workspace": str(ws),
         "owner": data.get("owner") or who,
         "generated_from": data.get("generated_from") or [],
-        "items": items,
-        "count": len(items),
-        "total": total,
-    }
-    if tier is not None:
-        out["tier"] = tier
-    if limit is not None:
-        out["limit"] = limit
-    if offset:
-        out["offset"] = offset
+        "as_of": as_of,
+        "snapshot_token": _snapshot_token(ws),
+        **_item_counts(items),
+    }, "items", items, _WORKLIST_DEFAULT_LIMIT if limit is None else limit, offset)
+    for key, value in (("tier", tier), ("kind", kind), ("status", status)):
+        if value is not None:
+            out[key] = value
+    if accepted_only:
+        out["accepted_only"] = True
     if compact:
+        out["items"] = [{k: it.get(k) for k in _WORKLIST_COMPACT_KEYS} for it in out["items"]]
         out["compact"] = True
-    omitted = total - (offset + len(items))
-    if omitted > 0:
-        out["omitted"] = omitted
-        out["next_offset"] = offset + len(items)
-        out["hint"] = f"more remain: pass offset={offset + len(items)} (or limit/compact) to page"
     return out
+
+
+def _cache_compatibility(data: dict, kind: Optional[str], status: Optional[str],
+                         accepted_only: bool, as_of: Optional[str]) -> Optional[dict]:
+    """Old caches cannot silently answer new acceptance or historical filters."""
+    rows = [i for i in data.get("items", []) if isinstance(i, dict)] if isinstance(data.get("items"), list) else []
+    historical = as_of or data.get("as_of") or any(i.get("as_of") for i in rows)
+    required = ({"kind"} if kind else set()) | ({"status"} if status else set())
+    if accepted_only:
+        required.add("accepted_owner")
+    if historical or any(not required <= row.keys() for row in rows):
+        return _ws_error("cached worklist cannot answer these filters",
+                         "call with use_cache=false for live evidence reconciliation",
+                         category="incompatible_cache")
+    return None
 
 
 def _worklist_cache(ws: Path, who: str) -> tuple:
@@ -1848,7 +1952,7 @@ def _worklist_cache(ws: Path, who: str) -> tuple:
     if not isinstance(data, dict):
         return None, _ws_error(f"cached worklist {path.name} is not a JSON object",
                                "call without use_cache; the next roll-up rewrites it", category="no_cache")
-    corpora = [(ws / n).stat().st_mtime for n in _WORKLIST_CORPORA if (ws / n).is_file()]
+    corpora = [(ws / n).stat().st_mtime for n in wsmod.WORKLIST_CORPORA if (ws / n).is_file()]
     newest = max(corpora) if corpora else 0.0
     recorded = data.get("corpora")
     if isinstance(recorded, dict):
@@ -1863,6 +1967,8 @@ def _worklist_cache(ws: Path, who: str) -> tuple:
         "cache_mtime": _iso_mtime(cache_mtime),
         "corpora_mtime": _iso_mtime(newest) if corpora else None,
         "stale": stale,
+        "snapshot_token": hashlib.sha256(json.dumps(
+            {"cache": data, "current": _snapshot_token(ws)}, sort_keys=True).encode()).hexdigest(),
     }
     return (data, meta), None
 
@@ -1871,13 +1977,12 @@ def _worklist_timeout_hint(phase: Optional[str]) -> str:
     """What a timed-out worklist phase implies (GitHub issue #113)."""
     name = (phase or "").split(" ", 1)[0]
     if name in ("matcher", "prime"):
-        return ("timed out while the dedupe matcher probed or embedded with the loopback Ollama: "
-                "check that it answers (whosaid_doctor), or set [search] embed = false in "
-                "whosaid.toml to rank with difflib only")
+        return ("timed out preparing source identity reconciliation: inspect the corpus and "
+                "message metadata, or use the cached result (use_cache=true). "
+                "Live worklists do not call an embedding model")
     if name in ("rank", "match", "score"):
         return ("timed out ranking: the corpora are large for a live query. Use the cached "
-                "result (use_cache=true), or pass owner=<speaker label>; with [search] embed on, "
-                "embed = false in whosaid.toml ranks faster")
+                "result (use_cache=true), or pass owner=<speaker label>")
     if name == "load":
         return "timed out reading _commitments.json/_action-items.json: check their size and the disk"
     if name == "write":
@@ -1894,26 +1999,16 @@ def whosaid_worklist(
     compact: bool = False,
     use_cache: bool = False,
     workspace: Optional[str] = None,
+    kind: Optional[str] = None,
+    status: Optional[str] = None,
+    accepted_only: bool = False,
+    as_of: Optional[str] = None,
 ) -> dict:
-    """Shell `workspace.py worklist <ws> --owner <owner> --json`.
+    """Read the shared ranked/reconciled worklist, filter and page with counts.
 
-    Returns {"ok", "workspace", "owner", "generated_from": [meetings], "items": [...],
-    "count", "total", "source": "live"} plus "omitted"/"next_offset"/"hint" while more remain.
-    Each item is {id, source, text, status, tier, score, why, first_seen, last_seen,
-    occurrences, requested_by, negative, also}; compact=true keeps only id, source, text,
-    tier, score, why. Reads _commitments.json and _action-items.json only (the roll-up
-    writes them), never the index. tier filters the full ranked list first, then
-    offset skips, then limit caps (the shell's order is never re-sorted); with
-    no explicit limit, every page self-caps at _WORKLIST_DEFAULT_LIMIT
-    items (GitHub issue #30).
-
-    GitHub issue #113: when neither corpus exists the answer is category
-    missing_corpora (the only one that recommends a roll-up) without running the
-    CLI. A timeout is category timeout with elapsed_s and phase, a hint for that
-    phase, and, when _WORKLIST-<Owner>.json exists, the cached result as "cached"
-    (sliced the same way, plus generated_at, corpora_mtime, stale). use_cache=true
-    returns that cache directly (source "cache", stale, generated_at) without
-    running the CLI; no cache file is category no_cache. Never writes anything.
+    Current caches report freshness across corpora, ledger and config. Historical
+    queries require live reconciliation; a timeout never substitutes current state.
+    Old caches missing requested classification fields are explicitly incompatible.
     """
     ws, err = _resolve_ws(workspace)
     if err:
@@ -1923,18 +2018,13 @@ def whosaid_worklist(
         tier = raw_tier.upper()
         if tier not in _WORKLIST_TIERS:
             return _ws_error(f"invalid tier '{raw_tier}'", "use one of: P1, P2, P3 (case-insensitive)")
-    try:
-        limit = None if limit is None else int(limit)
-    except (TypeError, ValueError):
-        return _ws_error(f"invalid limit '{limit}'", "pass a whole number >= 1")
-    if limit is not None and limit < 1:
-        return _ws_error(f"limit must be >= 1, got {limit}", "pass limit=N to cap the page size")
-    try:
-        offset = int(offset)
-    except (TypeError, ValueError):
-        return _ws_error(f"invalid offset '{offset}'", "pass a whole number >= 0")
-    if offset < 0:
-        return _ws_error(f"offset must be >= 0, got {offset}", "offset is a skip count; 0 is the first page")
+    limit, offset, err = _page_args(limit, offset)
+    if err:
+        return err
+    err = _tracking_args(kind, as_of)
+    if err:
+        return err
+    status = (str(status).strip() or None) if status is not None else None
     who = (owner or "").strip() or "me"
     if not any((ws / n).is_file() for n in _WORKLIST_CORPORA):
         return _ws_error(
@@ -1944,21 +2034,36 @@ def whosaid_worklist(
             category="missing_corpora",
         )
     if use_cache:
+        err = _cache_compatibility({}, kind, status, accepted_only, as_of)
+        if err:
+            return err
         cached, err = _worklist_cache(ws, who)
         if err:
             return err
         data, meta = cached
-        out = _worklist_view(ws, who, data, tier, limit, offset, compact)
+        err = _cache_compatibility(data, kind, status, accepted_only, as_of)
+        if err:
+            return err
+        out = _worklist_view(ws, who, data, tier, limit, offset, compact, kind, status, accepted_only, as_of)
         out.update(source="cache", **meta)
         return out
-    payload, err = _run_ws(WORKSPACE_PY, ["worklist", ws, "--owner", who], ws)
+    args = ["worklist", ws, "--owner", who]
+    for flag, value in (("--kind", kind), ("--status", status), ("--as-of", as_of)):
+        if value is not None and str(value).strip():
+            args += [flag, str(value).strip()]
+    if accepted_only:
+        args += ["--accepted-only"]
+    payload, err = _run_ws(WORKSPACE_PY, args, ws)
     if err:
         if err.get("category") == "timeout":
             hint = _worklist_timeout_hint(err.get("phase"))
-            cached, _ = _worklist_cache(ws, who)
+            cached, _ = _worklist_cache(ws, who) if as_of is None else (None, None)
+            cache_error = _cache_compatibility(cached[0], kind, status, accepted_only, as_of) if cached else None
+            if cache_error:
+                cached = None
             if cached:
                 data, meta = cached
-                view = _worklist_view(ws, who, data, tier, limit, offset, compact)
+                view = _worklist_view(ws, who, data, tier, limit, offset, compact, kind, status, accepted_only, as_of)
                 view.pop("ok", None)
                 view.pop("workspace", None)
                 view.update(meta)
@@ -1966,6 +2071,11 @@ def whosaid_worklist(
                 hint += (f". A cached worklist generated {meta['generated_at']} is attached as "
                          f"'cached' (stale={str(meta['stale']).lower()}); use_cache=true returns it "
                          "without re-running this query")
+            elif as_of or cache_error:
+                hint = (f"timed out during {err.get('phase') or 'worklist reconciliation'}; "
+                        "cached results cannot answer the requested historical or acceptance filters. "
+                        "Use live reconciliation for these filters")
+                err["cache_error"] = cache_error or _cache_compatibility({}, kind, status, accepted_only, as_of)
             else:
                 hint += ". There is no cached worklist (_WORKLIST-<Owner>.json) yet; the next roll-up writes one"
             err["hint"] = hint
@@ -1976,9 +2086,164 @@ def whosaid_worklist(
                            "[workspace] owner is set, else see the error (whosaid_doctor)")
         return err
     data = payload if isinstance(payload, dict) else {}
-    out = _worklist_view(ws, who, data, tier, limit, offset, compact)
+    out = _worklist_view(ws, who, data, tier, limit, offset, compact, kind, status, accepted_only, as_of)
     out["source"] = "live"
     return out
+
+
+@mcp.tool(name="whosaid_priorities", description=_DESC_WS_PRIORITIES, annotations=_read_only())
+def whosaid_priorities(
+    group: Optional[str] = None,
+    as_of: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> dict:
+    """Read recorded priority assertions using the shared ledger projection."""
+    ws, err = _resolve_ws(workspace)
+    if err:
+        return err
+    err = _tracking_args(as_of=as_of)
+    if err:
+        return err
+    import tracking
+    try:
+        view = tracking.priority_view(ws, group=group, as_of=as_of)
+    except (OSError, ValueError, TypeError) as exc:
+        return _ws_error(str(exc), "check the configured group and local tracking ledger",
+                         category="tracking_error")
+    return {"ok": True, "workspace": str(ws), **view,
+            "count": len(view["items"]), "snapshot_token": _snapshot_token(ws)}
+
+
+@mcp.tool(name="whosaid_tracking_suggestions", description=_DESC_WS_TRACKING_SUGGESTIONS,
+          annotations=_read_only())
+def whosaid_tracking_suggestions(
+    owner: str = "me",
+    limit: int = 50,
+    workspace: Optional[str] = None,
+) -> dict:
+    """Suggest evidence from a bounded read-only index scan, never import it."""
+    import sqlite3
+    import commitment_views
+    import message_identity
+    import tracking
+    import workspace as wsmod
+
+    ws, err = _resolve_ws(workspace)
+    if err:
+        return err
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        return _ws_error("limit must be a whole number from 1 to 1000",
+                         "omit limit for 50 review candidates", category="invalid_arguments")
+    db = wsconfig.search_db(ws)
+    if not db.is_file():
+        return _ws_error("completion evidence needs the transcript index",
+                         f"run: whosaid index {ws}", category="missing_index")
+    if not any((ws / n).is_file() for n in _WORKLIST_CORPORA):
+        return _ws_error("no commitment or action-item corpus exists",
+                         f"run: whosaid roll-up {ws} --action-items", category="missing_corpora")
+    started = time.monotonic()
+    deadline = started + WS_TIMEOUT
+    try:
+        cfg = wsconfig.load_config(ws)
+        who = wsmod.resolve_owner(ws, cfg, owner)
+        if not who:
+            return _ws_error("owner 'me' could not be resolved", "pass owner=<speaker label>",
+                             category="invalid_arguments")
+        raw = commitment_views.corpus_rows(ws)
+        aliases = commitment_views.identity_aliases(cfg, raw)
+        owner_key = commitment_views._name(who)
+        matching = [key for key, values in aliases.items()
+                    if owner_key == key or owner_key in {commitment_views._name(v) for v in values}]
+        if len(matching) == 1:
+            owner_key = matching[0]
+        labels = {owner_key, *(commitment_views._name(v) for v in aliases.get(owner_key, []))}
+        items = commitment_views.enrich_rows(ws, list(raw.values()))
+        items = [item for item in items if commitment_views._name(
+            item.get("accepted_owner") or item.get("owner") or item.get("speaker")) in labels
+            and item.get("status") not in tracking.TERMINAL
+            and item.get("kind") in {"explicit_commitment", "request"}]
+        if len(items) > 10000:
+            return _ws_error("too many owner items for a bounded evidence scan",
+                             "review the owner corpus before requesting suggestions", category="scope_too_large")
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+            has_attribution = "seg_message" in tables
+            fields = "s.rowid, s.meeting, s.source, s.speaker, s.t_sec, s.line, s.text"
+            join = ""
+            if has_attribution:
+                fields += ", m.message_id, m.attribution"
+                join = " LEFT JOIN seg_message m ON m.rowid=s.rowid"
+            sql = (f"SELECT {fields} FROM seg s{join} WHERE "
+                   "lower(replace(replace(s.speaker, '_', ' '), '-', ' ')) IN ("
+                   + ",".join("?" for _ in labels) + ") ORDER BY s.meeting, s.t_sec, s.rowid LIMIT 100001")
+            indexed = [dict(row) for row in conn.execute(sql, sorted(labels))]
+        finally:
+            conn.close()
+        if len(indexed) > 100000:
+            return _ws_error("owner has more than 100000 indexed turns",
+                             "use a smaller workspace for a bounded evidence scan", category="scope_too_large")
+        grouped: dict[str, list[dict]] = {}
+        seen = set()
+        skipped = 0
+        missing_attribution = False
+        for turn in indexed:
+            if time.monotonic() >= deadline:
+                return _ws_error("completion evidence scan timed out", "use a smaller workspace",
+                                 category="timeout", phase="suggestions", elapsed_s=round(time.monotonic() - started, 3))
+            raw_attribution = turn.get("attribution")
+            if raw_attribution:
+                attribution = json.loads(raw_attribution)
+                if not isinstance(attribution, dict):
+                    raise ValueError("indexed message attribution must be a JSON object")
+            else:
+                missing_attribution = True
+                attribution = message_identity.assertion_parts(turn["text"])
+            if attribution.get("quoted") or attribution.get("attribution_uncertain"):
+                skipped += 1
+                continue
+            key = turn.get("message_id") or (turn["meeting"], turn["source"], turn["line"])
+            if key in seen:
+                skipped += 1
+                continue
+            seen.add(key)
+            turn["text"] = attribution.get("assertion_text") or turn["text"]
+            for key in ("line", "t_sec"):
+                if turn.get(key) is not None:
+                    turn[key] = int(turn[key])
+            grouped.setdefault(turn["speaker"], []).append(turn)
+        candidates = []
+        for speaker, turns in grouped.items():
+            # Keep the original indexed speaker on the evidence; aliases only select
+            # which owner's items are compared with that speaker's own assertions.
+            matched = [{**item, "owner": speaker} for item in items]
+            candidates.extend(tracking.suggest_evidence(matched, turns, limit=limit + 1, deadline=deadline))
+            if time.monotonic() >= deadline:
+                return _ws_error("completion evidence matching timed out", "use a smaller workspace",
+                                 category="timeout", phase="suggestions", elapsed_s=round(time.monotonic() - started, 3))
+        candidates.sort(key=lambda e: (e["occurred_at"], e["item_id"], e["id"]), reverse=True)
+        candidates = list({e["id"]: e for e in candidates}.values())
+        limitations = ["Lexical candidates require review; no status or ledger is changed.",
+                       "Quoted and uncertain turns are excluded, including messages that also contain a new assertion.",
+                       "External artifacts are not checked; absence of a suggestion does not mean unfinished.",
+                       "Dates use indexed meeting folders; verify original message dates for imported chat or mail."]
+        if missing_attribution:
+            limitations.append("Some indexed turns lack message attribution metadata; only text-level quote checks were available.")
+        return {"ok": True, "workspace": str(ws), "owner": who, "items": candidates[:limit],
+                "count": min(len(candidates), limit), "limit": limit, "has_more": len(candidates) > limit,
+                "review_required": True, "items_scanned": len(items), "turns_scanned": len(indexed),
+                "turns_excluded": skipped, "limitations": limitations, "snapshot_token": _snapshot_token(ws)}
+    except TimeoutError:
+        return _ws_error("completion evidence matching timed out", "use a smaller workspace",
+                         category="timeout", phase="suggestions", elapsed_s=round(time.monotonic() - started, 3))
+    except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+        if time.monotonic() >= deadline:
+            return _ws_error("completion evidence scan timed out", "use a smaller workspace",
+                             category="timeout", phase="suggestions", elapsed_s=round(time.monotonic() - started, 3))
+        return _ws_error(str(exc), "check the local corpora, tracking ledger and transcript index",
+                         category="tracking_error")
 
 
 # ---------------------------------------------------------------------------
@@ -2298,6 +2563,15 @@ people, meetings, action items, commitments, PR mentions) plus `_WIKI.md`.
 - whosaid_search -> whosaid_context -> whosaid_items / whosaid_item /
   whosaid_person; whosaid_meetings, whosaid_prs, whosaid_speakers list the graph;
   whosaid_workspace_status reports index + rendered files + config owner.
+- whosaid_worklist and whosaid_items filter kind/status/accepted_only before
+  paging, with an automatic 50-row limit on every page. Compare snapshot_token
+  between pages and restart if the index, corpora, ledger or config changed.
+- whosaid_item accepts AI-NNN and CM-NNN; as_of reconciles dated tracking
+  evidence for items, named people and worklists. Current caches cannot answer
+  historical queries. Completed milestones and remaining work stay separate.
+- whosaid_priorities reads configured group assertions and their history;
+  whosaid_tracking_suggestions proposes later completion evidence from the local
+  index. Suggestions require review and never write statuses or ledger events.
 - Resources: `whosaid://workspace/wiki` (_WIKI.md), `whosaid://workspace/action-items`
   (_ACTION-ITEMS.md), `whosaid://workspace/index` (_INDEX.md),
   `whosaid://workspace/meeting/{folder}/transcript` (the folder's speaker

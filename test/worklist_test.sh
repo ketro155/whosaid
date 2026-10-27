@@ -485,7 +485,7 @@ live = json.loads(Path(sys.argv[3]).read_text())
 assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00", cache.pop("generated_at")), "generated_at"
 corpora = cache.pop("corpora")
 assert corpora == w.corpora_digests(Path(sys.argv[2]).parent), corpora
-assert set(corpora) == {"_commitments.json", "_action-items.json"}, corpora
+assert set(corpora) == {"_commitments.json", "_action-items.json", "whosaid.toml"}, corpora
 assert cache == live, "cache payload == worklist --json"
 assert w.worklist_cache_filename("Alice Example") == "_WORKLIST-Alice_Example.json"
 print("ok")
@@ -516,7 +516,7 @@ assert_has "- **CM-009** [open] 2026-09-16-0900 (1×) P1 · blocking=customer es
   "a blocking phrase cue is P1"
 assert_has "- **AI-001** [open] 2026-09-16-0900 (1×) P1 · boss · latest meeting: for the platform team write the rollout runbook" "$WL" \
   "an action item owned by an alias (Ali) joins the worklist; a leadership ask counts as boss"
-assert_has "- **AI-004** [open] 2026-09-16-0900 (1×) P3 · latest meeting: update the onboarding checklist" "$WL" \
+assert_has "- **AI-004** [open] 2026-09-16-0900 (1×): update the onboarding checklist" "$WL" \
   "an action item owned as 'Alice Example' (space) joins the worklist"
 assert_has "- **CM-011** [open] 2026-09-16-0900 (1×) P2 · latest meeting · strong cue: I will pair with Bob on the review" "$WL" \
   "a strong cue in the latest meeting is P2"
@@ -545,7 +545,8 @@ for ln in md.splitlines():
         sections[cur].append(re.match(r"- \*\*([A-Z]+-\d+)\*\*", ln).group(1))
 assert sections["P1"] == ["CM-001", "AI-001", "AI-002", "CM-009", "CM-002", "CM-008"], sections["P1"]
 assert sections["P2"] == ["CM-011", "CM-013", "CM-005", "CM-007"], sections["P2"]
-assert sections["P3"] == ["CM-012", "AI-004", "CM-010", "CM-006", "CM-003"], sections["P3"]
+assert sections["P3"] == ["CM-012", "CM-010", "CM-006", "CM-003"], sections["P3"]
+assert sections["Standing rules, suggestions and inferred tasks"] == ["AI-004"]
 assert sections["Done / history"] == [], sections["Done / history"]
 print("ok")
 PY
@@ -571,7 +572,7 @@ assert_absent "$WS/_WORKLIST-Ali.md" "--all-owners folds the alias label into th
 assert_absent "$WS/_WORKLIST-Alice_Example_.md" "--all-owners does not split 'Alice Example' from the owner"
 assert_has "- **CM-004** [open] 2026-09-14-0900 (1×) P1 · blocking=outage · strong cue: I'll fix the prod outage runbook" \
   "$WS/_WORKLIST-Carol_Example.md" "Carol's commitment ranks in her own worklist (outage, not the bare noun prod)"
-assert_has "- **AI-003** [open] 2026-09-16-0900 (1×) P3 · latest meeting: rotate the on-call schedule" \
+assert_has "- **AI-003** [open] 2026-09-16-0900 (1×): rotate the on-call schedule" \
   "$WS/_WORKLIST-Carol_Example.md" "Carol's action item joins her worklist"
 assert_absent "$WS/_WORKLIST-Bob_Example.md" "a requester with no items of their own gets no file"
 
@@ -670,16 +671,17 @@ unset WHOSAID_EMBED_FAKE
 assert_eq "$RC" 0 "worklist (fake embeddings) exit code"
 printf '%s\n' "$OUT" > "$TMP/fake.md"
 printf '%s\n' "$ERR" > "$TMP/fake.err"
-assert_has "fake embeddings" "$TMP/fake.err" "worklist logs the fake-embedding rule"
-assert_has "- **CM-006** [open] 2026-09-15-0900 → 2026-09-16-0900 (2×) P1 · boss · 2 meetings · latest meeting · strong cue: I'll write the rollout runbook for the platform team (also AI-001)" \
-  "$TMP/fake.md" "the reworded action item folds into its commitment as (also AI-001), lending its meeting and leadership ask"
-assert_not_has "- **AI-001**" "$TMP/fake.md" "the folded action item has no line of its own"
+assert_not_has "fake embeddings" "$TMP/fake.err" "evidence views do not initialize an embedding matcher"
+assert_has "- **CM-006** [open] 2026-09-15-0900 (1×) P3 · strong cue: I'll write the rollout runbook for the platform team" \
+  "$TMP/fake.md" "an accepted commitment remains separate from a semantically similar unanswered request"
+assert_has "- **AI-001**" "$TMP/fake.md" "the unanswered request retains its separate classification"
+assert_not_has "(also AI-001)" "$TMP/fake.md" "semantic similarity alone cannot establish acceptance"
 
 run_ws worklist "$WS"
 assert_eq "$RC" 0 "worklist (embed server unreachable) exit code"
 printf '%s\n' "$OUT" > "$TMP/difflib.md"
 printf '%s\n' "$ERR" > "$TMP/difflib.err"
-assert_has "not reachable" "$TMP/difflib.err" "worklist logs the difflib-only fallback"
+assert_not_has "not reachable" "$TMP/difflib.err" "worklist does not probe the model server"
 assert_has "- **AI-001** [open]" "$TMP/difflib.md" "difflib fallback keeps the action item as its own line"
 assert_not_has "(also AI-001)" "$TMP/difflib.md" "difflib fallback folds nothing across sources"
 
@@ -694,12 +696,12 @@ printf '%s\n' "$OUT" > "$TMP/wl.json"
 cat > "$TMP/check_json.py" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert set(d) == {"owner", "generated_from", "items"}, sorted(d)
+assert set(d) == {"owner", "generated_from", "items", "kind_counts", "status_counts"}, sorted(d)
 assert d["owner"] == "Alice_Example", d["owner"]
 assert d["generated_from"] == ["2026-09-14-0900", "2026-09-15-0900", "2026-09-16-0900"], d["generated_from"]
 keys = {"id", "source", "text", "status", "tier", "score", "why", "first_seen", "last_seen",
         "occurrences", "requested_by", "negative", "also", "merged_into"}
-assert all(set(it) == keys for it in d["items"]), [sorted(it) for it in d["items"]][:1]
+assert all(keys <= set(it) for it in d["items"]), [sorted(it) for it in d["items"]][:1]
 by_id = {it["id"]: it for it in d["items"]}
 assert by_id["CM-001"]["tier"] == "P1" and by_id["CM-001"]["score"] == 7, by_id["CM-001"]
 assert by_id["CM-001"]["why"] == ["boss", "overdue=2026-09-15", "strong cue"], by_id["CM-001"]
@@ -725,7 +727,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 owners = [o["owner"] for o in d["owners"]]
 assert owners == ["Alice_Example", "Carol_Example"], owners
-assert all(set(o) == {"owner", "generated_from", "items"} for o in d["owners"]), d["owners"][0].keys()
+assert all(set(o) == {"owner", "generated_from", "items", "kind_counts", "status_counts"} for o in d["owners"]), d["owners"][0].keys()
 assert [it["id"] for it in d["owners"][1]["items"]] == ["CM-004", "AI-003"], d["owners"][1]["items"]
 print("ok")
 PY
@@ -904,13 +906,15 @@ def seen():
 cm, ai = [], []
 for i in range(300):
     first, last, m = seen()
-    cm.append({"id": f"CM-{i + 1:03d}", "text": sentence("I'll"), "speaker": owner, "status": "open",
+    cm.append({"id": f"CM-{i + 1:03d}", "text": f'[{owner} 00:00:01] "' + sentence("I'll") + '"', "speaker": owner, "status": "open",
                "first_seen": first, "last_seen": last,
+               "ai_refs": f"AI-{i + 1:03d}" if i % 3 == 0 else "",
                "occurrences": [{"meeting": x, "line": 1, "owner": owner, "text": "x"} for x in m]})
 for i in range(600):
     first, last, m = seen()
-    ai.append({"id": f"AI-{i + 1:03d}", "text": sentence(""), "owner": owner, "status": "open",
-               "type": "action", "first_seen": first, "last_seen": last,
+    text = cm[i]["text"] if i < 300 and i % 3 == 0 else f'[{owner} 00:00:01] "' + sentence("I'll") + '"'
+    ai.append({"id": f"AI-{i + 1:03d}", "text": text, "owner": owner, "status": "open",
+               "type": "own commitments", "first_seen": first, "last_seen": last,
                "occurrences": [{"meeting": x, "line": 1} for x in m]})
 (ws / "_commitments.json").write_text(json.dumps({"next_id": 301, "folded_meetings": meetings, "items": cm}))
 (ws / "_action-items.json").write_text(json.dumps({"next_id": 601, "folded_meetings": meetings, "items": ai}))

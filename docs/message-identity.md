@@ -2,7 +2,7 @@
 
 Search keeps every original transcript turn and source pointer. Overlapping
 Teams or Outlook imports can therefore be inspected independently without
-counting the same source message several times in search results.
+counting the same source message several times in results or worklist ranking.
 
 ## How messages match
 
@@ -35,7 +35,7 @@ After confirmation, add an explicit local mapping to the workspace's
 ```
 
 Aliases apply only when a sidecar lacks a real conversation ID. Run the normal
-index rebuild to refresh search output. Original transcripts and
+index rebuild to refresh search and worklist output. Original transcripts and
 sidecars remain unchanged. An alias confirms conversation context. When no real
 message ID exists, messages must still match the exact source clock, speaker,
 and normalized full body to merge.
@@ -72,7 +72,7 @@ Search JSON includes `message_id`, `provenance`, `assertion_text`, `quoted`, and
 meeting folder, file, transcript line, and timestamp. Filtering search to a
 particular folder can still return that folder's copy.
 
-## Resolving source occurrences
+## Worklist recurrence
 
 `MessageIndex.resolve_occurrence()` accepts source pointers and can resolve a
 precise `HH:MM:SS` timestamp retained inside an action-item summary's brackets.
@@ -81,9 +81,9 @@ message. There is no nearest-time matching. An action-item document line is
 never interpreted as a transcript line. Unresolved or ambiguous pointers keep
 their independent meeting identity.
 
-`MessageIndex.occurrence_keys()` returns unique keys for consumers that count
-recurrence: imported chat/mail messages count once across confirmed copies,
-while audio transcripts count once per meeting. Repeated sentences within one
-audio meeting share a key. A later distinct source message or a later audio
-meeting can still contribute another key. Original source pointers remain
-available through `MessageIndex.provenance()`.
+Worklists retain raw meeting and occurrence provenance. Their
+`independent_occurrences` field supplies recurrence scoring: imported chat/mail
+messages count once across confirmed copies, while audio transcripts count once
+per meeting. Repeated sentences within one audio meeting do not earn additional
+recurrence credit. A later distinct source message or a later audio meeting can
+still contribute another occurrence.

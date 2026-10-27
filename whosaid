@@ -554,10 +554,25 @@ COMMITMENTS
                       speaker, else [workspace] owner.
   --all-owners        Every participant (markdown concatenated; --json wraps
                       them as {"owners": [...]}).
+  --kind KIND         explicit_commitment, request, standing_directive,
+                      suggestion, or inferred_next_step.
+  --accepted-only     Only obligations with evidenced acceptance.
+  --status STATUS     Filter the reconciled status, including delivered,
+                      accepted, partial, blocked, and unknown.
+  --as-of DATE        Reconstruct evidence state at an ISO date or timestamp.
   --json              {owner, generated_from, items: [{id, source, text, status,
                       tier, score, why, first_seen, last_seen, occurrences,
                       requested_by, negative, also}]}.
   -o, --out FILE      Write there instead of stdout.
+
+TRACKING
+  tracking import <ws> <events.json>  Append reviewed evidence atomically.
+  tracking priorities <ws> [--group NAME] [--as-of DATE]
+  tracking show <ws> <items.json> [--as-of DATE]
+  tracking suggest <items.json> <turns.json> [--limit N]
+  The local _tracking.json ledger stores status history, milestone splits,
+  priority assertions, and accepted handoffs separately from generated data.
+  Suggestions require review before import. See docs/tracking.md.
 
 WORKSPACE SEARCH
   <ws> is the meeting workspace directory. Every search command also accepts it
@@ -2168,6 +2183,12 @@ cmd_commitments() {
   exec "$WHOSAID_PY" "$REPO_DIR/lib/workspace.py" worklist "$@"
 }
 
+cmd_tracking() {
+  want_help "$@" && { help_section "TRACKING"; return 0; }
+  require_module "$REPO_DIR/lib/tracking.py" tracking
+  exec "$WHOSAID_PY" "$REPO_DIR/lib/tracking.py" "$@"
+}
+
 # ---- workspace search / graph / wiki / watch / memos (issue #14) ----------------
 # Thin bash fronts for the stdlib modules in lib/: every remaining argument is
 # passed through untouched, so the modules own their flag sets. <ws> may be
@@ -2382,6 +2403,9 @@ case "${1:-}" in
     ;;
   commitments|worklist)
     cmd_commitments "${@:2}"
+    ;;
+  tracking)
+    cmd_tracking "${@:2}"
     ;;
   index)
     cmd_index "${@:2}"

@@ -495,10 +495,15 @@ def _print_json(obj) -> None:
 
 # ---- views ----------------------------------------------------------------------------
 
+def _enrich(c: sqlite3.Connection, rows: list[dict], as_of: str | None = None) -> list[dict]:
+    from commitment_views import enrich_rows
+    filename = next((r[2] for r in c.execute("PRAGMA database_list") if r[1] == "main"), "")
+    return enrich_rows(Path(filename).parent, rows, as_of=as_of) if filename else rows
+
 def view_items(c: sqlite3.Connection, owner: str | None, requester: str | None,
-               status: str | None, itype: str | None) -> list[dict]:
+               status: str | None, itype: str | None, as_of: str | None = None) -> list[dict]:
     where, params = [], []
-    for col, val in (("owner", owner), ("status", status), ("type", itype)):
+    for col, val in (("type", itype),):
         if val:
             where.append(f"{col} LIKE ?")
             params.append(f"%{val}%")
@@ -506,11 +511,13 @@ def view_items(c: sqlite3.Connection, owner: str | None, requester: str | None,
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id"
-    reqs = requesters_by_item(load_commitments(c))
+    reqs = requesters_by_item(_enrich(c, load_commitments(c), as_of))
     items = [_item_dict(r, reqs) for r in c.execute(sql, params)]
     if requester:
         items = [it for it in items if any(name_match(r, requester) for r in it["requesters"])]
-    return items
+    items = _enrich(c, items, as_of)
+    return [it for it in items if (not status or status.lower() in it["status"].lower())
+            and (not owner or name_match(it.get("owner", ""), owner))]
 
 
 def print_items(items: list[dict]) -> None:
@@ -526,16 +533,19 @@ def print_items(items: list[dict]) -> None:
     print(f"{len(items)} item(s).")
 
 
-def view_item(c: sqlite3.Connection, aid: str) -> dict:
+def view_item(c: sqlite3.Connection, aid: str, as_of: str | None = None) -> dict:
     r = c.execute("SELECT * FROM action_item WHERE id=?", (aid,)).fetchone()
     if r is None:
         raise GraphError(f"{aid} not found in the action-item corpus; see: whosaid graph items")
-    commitments = load_commitments(c)
+    commitments = _enrich(c, load_commitments(c), as_of)
     d = _item_dict(r, requesters_by_item(commitments))
     d["occurrences"] = [{"meeting": o["meeting"], "line": o["line"]} for o in
                         c.execute("SELECT meeting, line FROM occurrence WHERE id=? ORDER BY meeting, line", (aid,))]
-    d["commitments"] = [cm for cm in commitments if aid in cm["ai_refs"]]
-    return d
+    d["commitments"] = _enrich(c, [cm for cm in commitments if aid in cm["ai_refs"]], as_of)
+    result = _enrich(c, [d], as_of)
+    if not result:
+        raise GraphError(f"{aid} did not exist at {as_of}")
+    return result[0]
 
 
 def print_item(d: dict) -> None:
@@ -557,12 +567,12 @@ def print_item(d: dict) -> None:
 
 
 def view_commitments(c: sqlite3.Connection, owner: str | None, source: str | None,
-                     status: str | None) -> list[dict]:
+                     status: str | None, as_of: str | None = None) -> list[dict]:
     """The unified commitment table, one row per CM-NNN occurrence, optionally
     filtered. --owner is a name_match substring; --source matches transcript /
     action-items exactly ('_' and '-' are equivalent); --status is a
     case-insensitive substring."""
-    cms = load_commitments(c)
+    cms = _enrich(c, load_commitments(c), as_of)
     if owner:
         cms = [cm for cm in cms if name_match(cm["owner"], owner)]
     if source:
@@ -602,9 +612,9 @@ def print_people(people: list[dict]) -> None:
         print("no speakers indexed yet.")
 
 
-def view_person(c: sqlite3.Connection, name: str) -> dict:
+def view_person(c: sqlite3.Connection, name: str, as_of: str | None = None) -> dict:
     people = [p for p in view_people(c) if name_match(p["name"], name)]
-    commitments = load_commitments(c)
+    commitments = _enrich(c, load_commitments(c), as_of)
     order = meeting_order(c)
 
     def newest_first(entries: list[dict]) -> list[dict]:
@@ -618,15 +628,16 @@ def view_person(c: sqlite3.Connection, name: str) -> dict:
     owned = newest_first(dedupe_commitments(
         [cm for cm in commitments if name_match(cm["owner"], name)]))
     reqs = requesters_by_item(commitments)
-    items = {r["id"]: _item_dict(r, reqs) for r in c.execute("SELECT * FROM action_item ORDER BY id")}
+    items = {r["id"]: r for r in _enrich(c, [_item_dict(r, reqs) for r in
+             c.execute("SELECT * FROM action_item ORDER BY id")], as_of)}
     cited = {aid for e in requested for aid in e["ai_refs"]}
     return {
         "query": name,
         "people": people,
-        "requested": requested,
-        "requested_items": [items[a] for a in sorted(cited) if a in items],
-        "owned": owned,
-        "owned_items": [it for it in items.values() if name_match(it["owner"], name)],
+        "requested": _enrich(c, requested, as_of),
+        "requested_items": _enrich(c, [items[a] for a in sorted(cited) if a in items], as_of),
+        "owned": _enrich(c, owned, as_of),
+        "owned_items": _enrich(c, [it for it in items.values() if name_match(it["owner"], name)], as_of),
     }
 
 
@@ -823,7 +834,9 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 def cmd_items(args: argparse.Namespace) -> int:
     with open_graph(_ws(args)) as c:
-        items = view_items(c, args.owner, args.requester, args.status, args.type)
+        items = view_items(c, args.owner, args.requester, args.status, args.type, getattr(args, "as_of", None))
+    from commitment_views import filter_rows
+    items = filter_rows(items, getattr(args, "kind", None), accepted_only=getattr(args, "accepted_only", False))
     if args.json:
         _print_json(items)
     else:
@@ -836,7 +849,7 @@ def cmd_item(args: argparse.Namespace) -> int:
         log(f"item: expected an action-item id like AI-001, got {args.id!r}")
         return 2
     with open_graph(_ws(args)) as c:
-        d = view_item(c, args.id)
+        d = view_item(c, args.id, getattr(args, "as_of", None))
     if args.json:
         _print_json(d)
     else:
@@ -846,7 +859,9 @@ def cmd_item(args: argparse.Namespace) -> int:
 
 def cmd_commitments(args: argparse.Namespace) -> int:
     with open_graph(_ws(args)) as c:
-        cms = view_commitments(c, args.owner, args.source, args.status)
+        cms = view_commitments(c, args.owner, args.source, args.status, getattr(args, "as_of", None))
+    from commitment_views import filter_rows
+    cms = filter_rows(cms, getattr(args, "kind", None), accepted_only=getattr(args, "accepted_only", False))
     if args.json:
         _print_json(cms)
     else:
@@ -861,7 +876,7 @@ def cmd_person(args: argparse.Namespace) -> int:
     ws = wsconfig.resolve_workspace(ws_arg)
     with open_graph(ws) as c:
         if name:
-            d = view_person(c, name)
+            d = view_person(c, name, getattr(args, "as_of", None))
             if args.json:
                 _print_json(d)
             else:
@@ -936,12 +951,16 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--status", help="open, ongoing, contingent, resolved, merged, ...")
     pi.add_argument("--type", help="free-form type, e.g. 'leadership ask'")
     pi.add_argument("--json", action="store_true", help="print a JSON array")
+    pi.add_argument("--kind", help="structured obligation kind")
+    pi.add_argument("--accepted-only", action="store_true", help="only accepted obligations")
+    pi.add_argument("--as-of", help="tracking state at an ISO date or timestamp")
     pi.set_defaults(func=cmd_items)
 
     pit = sub.add_parser("item", help="one action item with its occurrences and commitments")
     pit.add_argument("ws", nargs="?", help=ws_help)
     pit.add_argument("id", help="action-item id, e.g. AI-001")
     pit.add_argument("--json", action="store_true", help="print a JSON object")
+    pit.add_argument("--as-of", help="tracking state at an ISO date or timestamp")
     pit.set_defaults(func=cmd_item)
 
     pcm = sub.add_parser("commitments", help="the unified commitment corpus: one row per "
@@ -951,6 +970,9 @@ def build_parser() -> argparse.ArgumentParser:
     pcm.add_argument("--source", help="transcript or action-items")
     pcm.add_argument("--status", help="open, ongoing, done, merged, ... (case-insensitive substring)")
     pcm.add_argument("--json", action="store_true", help="print a JSON array")
+    pcm.add_argument("--kind", help="structured obligation kind")
+    pcm.add_argument("--accepted-only", action="store_true")
+    pcm.add_argument("--as-of", help="tracking state at an ISO date or timestamp")
     pcm.set_defaults(func=cmd_commitments)
 
     for cmd, help_text in (("person", "speakers, or one person's asks and commitments"),
@@ -960,6 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
         if cmd == "person":
             pp.add_argument("name", nargs="?", help="speaker/owner/requester (case-insensitive substring)")
         pp.add_argument("--json", action="store_true", help="print JSON")
+        pp.add_argument("--as-of", help="tracking state at an ISO date or timestamp")
         pp.set_defaults(func=cmd_person)
 
     ppr = sub.add_parser("prs", help="pull-request numbers mentioned, spoken or written")
@@ -986,7 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except GraphError as e:
+    except (GraphError, ValueError, OSError) as e:
         log(f"{args.command}: {e}")
         return 1
     except sqlite3.OperationalError as e:

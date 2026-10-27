@@ -6,12 +6,30 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Evidence-backed status history, corrections, compound milestones, and temporal
+  priority assertions in a local ledger preserved across reindexing (#107, #108,
+  #111). CLI import and read views share the same reconciliation rules.
+- Structured obligation kinds, attributed acceptance, pending versus accepted
+  handoffs, and historical item/person/worklist filters (#109, #111).
+- Stable imported-message identity, preserved provenance, conservative conversation
+  aliases, and quote-aware attribution for search and recurrence scoring (#110).
+- Read-only MCP priority and completion-evidence suggestion tools. Suggestions
+  require review and have bounded scans and deadlines (#107, #111).
+
 ### Fixed
 
 - **Default MCP pages stay bounded (#112).** Omitting `limit` now caps every page at 50,
   including calls with `offset`, for items, meetings, PRs, speakers and worklists.
   Explicit limits retain their requested size. Worklist replies also include
   `next_offset` when more items remain.
+- Compact rows include status, kind, acceptance, and evidence availability (#112).
+- Ledger/config changes invalidate cached worklists and paging snapshots.
+  Historical requests cannot fall back to current cached state (#113).
+- Worklist views retain delivered/partial evidence, exclude standing directives
+  and inferred tasks from overdue ranking, and include accepted handoff recipients
+  in all-owner queries. Summary source pointers preserve obligation origin.
 
 ## [1.16.0] - 2026-10-25
 

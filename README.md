@@ -840,7 +840,8 @@ The corpus answers "what did I promise"; the worklist answers "what should I do 
 roll-up (and `whosaid commitments <ws>` on demand) takes the union of the owner's commitments
 (`CM-NNN`, speaker = owner) and the action items assigned to them (`AI-NNN`, owner matched
 case-insensitively with `_`/space interchangeable, plus `[workspace] aliases`), folds the two
-sources together (an action item that restates a commitment appears once, as `(also AI-012)`),
+sources together when a source pointer or explicit ID reference establishes equivalence
+(the item appears once, as `(also AI-012)`),
 and ranks what is open. Deterministic, no LLM:
 
 | Tier | Rule |
@@ -892,6 +893,49 @@ last_seen, occurrences, requested_by, negative, …}]}` for scripts and the MCP 
 boss names, weights, and the embedding threshold are overridable in `whosaid.toml`
 `[commitments]` (see the example under [Search your meetings](#search-your-meetings)).
 
+### Evidence, milestones, and leadership priorities
+
+The optional workspace `_tracking.json` ledger records reviewed evidence separately
+from generated corpora. Reindexing preserves it. Item, person, and worklist views
+use the same status history, milestone state, and accepted ownership. A merged
+change can complete a coding milestone while deployment remains unfinished.
+Missing evidence never means `not_started`.
+
+```bash
+whosaid tracking import ./meetings ./reviewed-events.json
+whosaid commitments ./meetings --status delivered --json
+whosaid commitments ./meetings --accepted-only --as-of 2020-01-31 --json
+whosaid tracking priorities ./meetings --group leadership --as-of 2020-01-31
+```
+
+Obligation kinds distinguish explicit commitments, requests, standing directives,
+suggestions, and inferred next steps. Acceptance needs attributed evidence;
+assignment alone is insufficient. Standing directives and inferred tasks remain
+visible separately and do not accrue overdue scores. Exact source pointers can
+reconcile a summary item with its extracted commitment without inventing a second
+promise. Ambiguous pointers remain separate.
+
+Priority assertions retain the speaker, scope, evidence, and date. An explicit
+rank is distinguished from an inferred rank; different leaders' conflicting
+assertions stay visible. Requested handoffs remain pending until accepted.
+Historical views use event occurrence time and the current configured group
+membership, not a reconstruction of the historical organization chart.
+
+Imported messages retain all source citations while confirmed overlapping copies
+count once in search results and recurrence scoring. Ambiguous conversation
+matches need explicit local aliases. See [message identity](docs/message-identity.md)
+and the [tracking event format and examples](docs/tracking.md).
+
+MCP clients can call `whosaid_priorities` and `whosaid_tracking_suggestions`.
+Suggestions scan the local index within a deadline and require review before
+import; they neither verify external artifacts nor change status automatically.
+The existing item/worklist tools accept `kind`, `accepted_only`, and `as_of`.
+Every omitted page limit caps the response at 50, including offset-only calls.
+Compact rows retain status, kind, acceptance, and evidence availability. Snapshot
+tokens and cache freshness cover corpus, ledger, and configuration changes.
+Historical queries cannot substitute a current cached answer. Live worklists use
+source identity and do not probe or call an embedding model.
+
 ## Use it from an AI agent (MCP)
 
 whosaid's local, private, GPU transcription and speaker diarization are also exposed as MCP tools,
@@ -932,20 +976,22 @@ The [workspace search](#search-your-meetings) layer is exposed too, so an agent 
 did we decide about the budget" from the transcripts instead of reading them whole. Every tool
 takes an optional `workspace` argument and otherwise uses `WHOSAID_WORKSPACE` from the server's
 environment; there is no current-directory fallback. None of them rebuilds the index: `whosaid
-index` (or the watcher) owns writes, and the tools only read `_search.db`.
+index` (or the watcher) owns writes, and the tools read the index, corpora, and optional tracking ledger.
 
 | Tool | What it does |
 |---|---|
 | `whosaid_search` | Turn-level hits (meeting folder, timestamp, speaker, snippet) for a query in `exact`, `meaning`, or `hybrid` mode, with speaker/meeting filters. |
 | `whosaid_context` | The verbatim turns around one hit, so an agent reads a minute instead of a transcript. |
-| `whosaid_items` | The action-item corpus, filterable by owner, requester, status, and type. Numeric-id order; omitting `limit` caps every page at 50 even with `offset` (set an explicit `limit` for another size). Replies include `total`/`omitted`/`next_offset`; `compact` for id/text/type/owner/status/occurrences; `index_mtime` flags a rebuilt index between pages (restart at offset 0). |
+| `whosaid_items` | Filter by owner, requester, status, type, kind, accepted ownership, or historical date. Numeric ID order, 50 per page by default, with counts, continuation offset, and a snapshot token. Compact rows preserve status and evidence availability. |
 | `whosaid_item` | One item with its occurrences and timestamped commitments. |
 | `whosaid_person` | A person's talk share, the commitments they made, and the asks they received. |
 | `whosaid_meetings` | Every meeting folder with coverage figures. |
 | `whosaid_prs` | Pull-request numbers mentioned in speech or in the notes. |
 | `whosaid_speakers` | Talk share per speaker across the workspace. |
 | `whosaid_workspace_status` | Whether the index exists, how many turns it holds, and whether Ollama is reachable. |
-| `whosaid_worklist` | The owner's ranked worklist (P1/P2/P3 with score and why) from the commitments and action-item corpora, the `whosaid commitments --json` payload; `owner` defaults to `me`. `tier` (P1/P2/P3), `limit`, and `offset` filter and page it (tier first, then offset, then limit); `compact=true` keeps only id, source, text, tier, score and why per item; omitting `limit` caps every page at 50 even with `offset` (set an explicit `limit` for another size). Replies include `total`/`omitted`/`next_offset` and a paging `hint`. Errors carry a `category`: `missing_corpora` (neither `_commitments.json` nor `_action-items.json` exists; checked before anything runs, and the only error that says to run the roll-up), `timeout` (with `elapsed_s`, the `phase` it was in such as `matcher`, `prime`, `match` and a hint for that phase, plus the cached result as `cached` when one exists), `exit_<code>`, `bad_json`, `no_cache`. The roll-up writes that cache to `_WORKLIST-<Owner>.json` next to the `.md` (the `--json` payload plus the corpora's sha256 and `generated_at`); `use_cache=true` returns it without running the ranking, with `source: "cache"`, `generated_at` and `stale` (true when the corpora changed since). The tool never writes the cache. |
+| `whosaid_worklist` | Ranked and reconciled commitments, filterable by tier, kind, status, acceptance and historical date. Pages default to 50. Timeouts include elapsed time and phase; current caches report generation time and freshness. `use_cache=true` reads the cache directly. Historical queries require live reconciliation. |
+| `whosaid_priorities` | Current or historical priority assertions, optionally filtered to a configured leadership group, retaining evidence and conflicts. |
+| `whosaid_tracking_suggestions` | Bounded local search for later completion evidence. Returns review-required candidates and limitations; never changes status. |
 
 Resources, all reading `WHOSAID_WORKSPACE`: `whosaid://workspace/wiki` (`_WIKI.md`),
 `whosaid://workspace/action-items` (`_ACTION-ITEMS.md`), `whosaid://workspace/index`

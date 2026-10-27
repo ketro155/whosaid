@@ -213,7 +213,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -2635,6 +2635,7 @@ def owner_aliases(owner: str, cfg: dict) -> list[str]:
 def _cm_entry(it: CommitmentItem) -> dict:
     return {
         "id": it.id, "source": "commitments", "text": it.text, "status": it.status,
+        "owner": it.speaker,
         "open": it.status == "open", "merged_into": it.merged_into,
         "first_seen": it.first_seen, "last_seen": it.last_seen,
         "meetings": {o.meeting for o in it.occurrences} or ({it.first_seen} if it.first_seen else set()),
@@ -2647,6 +2648,7 @@ def _cm_entry(it: CommitmentItem) -> dict:
 def _ai_entry(it: ActionItem) -> dict:
     return {
         "id": it.id, "source": "action-items", "text": it.text, "status": it.status,
+        "owner": it.owner,
         "open": it.status in ("open", "ongoing"), "merged_into": it.merged_into,
         "first_seen": it.first_seen, "last_seen": it.last_seen,
         "meetings": {o.meeting for o in it.occurrences} or ({it.first_seen} if it.first_seen else set()),
@@ -2656,19 +2658,25 @@ def _ai_entry(it: ActionItem) -> dict:
 
 
 def worklist_entries(owner: str, cm_items: list[CommitmentItem], ai_items: list[ActionItem],
-                     matcher: TextMatcher, aliases: list[str] | None = None) -> list[dict]:
+                     matcher: TextMatcher, aliases: list[str] | None = None,
+                     annotations: dict[str, dict] | None = None) -> list[dict]:
     """The owner's items from both corpora as entry dicts: every CM item the
-    owner spoke plus every AI item they own. An action item that reads like
-    one of the owner's commitments (same matcher rule as folding) is not a
-    second line: it folds into the commitment as "(also AI-NNN)" and lends
-    it its meetings. Merged items ride along for the history section."""
+    owner spoke plus every AI item they own. With enriched source annotations,
+    only proven aliases fold into a commitment as "(also AI-NNN)" and lend
+    it their meetings. Legacy callers without annotations retain text matching.
+    Merged items ride along for the history section."""
     om = OwnerMatcher(owner, aliases)
-    mine_cm = [it for it in cm_items if same_person(it.speaker, owner)]
-    mine_ai = [it for it in ai_items if om.owns(it.owner)]
+    def owned(it, original):
+        if annotations is None:
+            return om.owns(original)
+        return it.id in annotations and om.owns(annotations[it.id].get("owner", original))
+    mine_cm = [it for it in cm_items if owned(it, it.speaker)]
+    mine_ai = [it for it in ai_items if owned(it, it.owner)]
     entries = [_cm_entry(it) for it in mine_cm]
     hosts = [e for e in entries if e["status"] != "merged"]
     phase(f"prime {owner}")
-    matcher.prime([e["text"] for e in hosts] + [it.text for it in mine_ai])
+    if annotations is None:
+        matcher.prime([e["text"] for e in hosts] + [it.text for it in mine_ai])
     phase(f"match {owner}")
     # GitHub issue #113: this loop is the worklist's hot spot (every owned AI
     # item against every host). Only matches()'s verdict is kept, never the
@@ -2684,6 +2692,15 @@ def worklist_entries(owner: str, cm_items: list[CommitmentItem], ai_items: list[
         host = None
         if ai.status != "merged" and e["_norm"]:
             for cand, sm in zip(hosts, seqs):
+                if annotations is not None:
+                    # A display fold also carries reviewed evidence. Text
+                    # similarity is not proof that two deliverables are the
+                    # same task; only an explicit reference or unique shared
+                    # source pointer can establish this identity.
+                    if ai.id in annotations[cand["id"]].get("tracking_aliases", []):
+                        host = cand
+                        break
+                    continue
                 sm.set_seq1(e["_norm"])
                 ratio = sm.real_quick_ratio()
                 if ratio >= matcher.threshold:
@@ -2768,11 +2785,12 @@ class Ranker:
         w = self.weights
         why: list[str] = []
         score = 0
-        n = len(e["meetings"]) or 1
+        n = e.get("independent_occurrences", len(e["meetings"])) or 1
         boss = self.is_boss(e)
         negators = self.cfg["negators"]
         blocking = cue_hit(e["text"], self.cfg["blocking_cues"], negators)
-        due = deadline_cue(e["text"], self.cfg["deadline_cues"], negators)
+        due = (deadline_cue(e["text"], self.cfg["deadline_cues"], negators)
+               if e.get("overdue_eligible", True) else "")
         overdue = self.overdue_on(due, e["last_seen"])
         recent = bool(self.latest) and e["last_seen"] == self.latest
         strength = cue_strength(e["cue"], self.cfg["strong_cues"], self.cfg["weak_cues"])
@@ -2790,7 +2808,8 @@ class Ranker:
             why.append(f"due={due}")
             score += w.get("deadline", 0)
         if n >= 2:
-            why.append(f"{n} meetings")
+            unit = "meetings" if n == len(e["meetings"]) else "independent occurrences"
+            why.append(f"{n} {unit}")
             score += w.get("repeat", 0) * (n - 1)
         if recent:
             why.append("latest meeting")
@@ -2820,7 +2839,7 @@ def rank_entries(entries: list[dict], ranker: Ranker) -> None:
     mistake a done item for a P1. Then order: open by tier, score desc,
     last_seen desc, id; history by last_seen desc, id."""
     for e in entries:
-        if e["open"]:
+        if e["open"] and e.get("kind") not in ("standing_directive", "inferred_next_step", "suggestion"):
             ranker.rank(e)
         else:
             e["tier"], e["score"], e["why"] = "", 0, []
@@ -2842,13 +2861,26 @@ def worklist_payload(owner: str, entries: list[dict], generated_from: list[str])
     for e in entries:
         items.append({
             "id": e["id"], "source": e["source"], "text": e["text"], "status": e["status"],
+            "owner": e.get("owner", owner),
             "tier": e["tier"], "score": e["score"], "why": list(e["why"]),
             "first_seen": e["first_seen"], "last_seen": e["last_seen"],
             "occurrences": len(e["meetings"]), "requested_by": e["requested_by"],
             "negative": bool(e["negative"]), "also": list(e["also"]),
             "merged_into": e["merged_into"],
+            **{k: e[k] for k in (
+                "kind", "requester", "proposed_owner", "accepted_owner", "acceptance_evidence",
+                "obligation_status", "classification_reason", "actionable", "overdue_eligible",
+                "status_history", "evidence", "evidence_count", "milestones", "conflicts",
+                "tracking", "handoff", "next_action_owner", "independent_occurrences",
+                "message_provenance", "as_of", "status_basis",
+                "status_source", "tracking_history", "evidence_available", "remaining_milestones",
+                "pending_handoffs",
+            ) if k in e},
         })
-    return {"owner": owner, "generated_from": list(generated_from), "items": items}
+    from collections import Counter
+    return {"owner": owner, "generated_from": list(generated_from), "items": items,
+            "kind_counts": dict(Counter(i.get("kind", "unknown") for i in items)),
+            "status_counts": dict(Counter(i.get("status", "unknown") for i in items))}
 
 
 def worklist_line(e: dict) -> str:
@@ -2891,6 +2923,11 @@ def render_worklist_md(owner: str, entries: list[dict], generated_from: list[str
             continue
         lines += [worklist_line(e) for e in tiered]
         lines.append("")
+    other = [e for e in open_entries if not e["tier"]]
+    if other:
+        lines += ["## Standing rules, suggestions and inferred tasks", ""]
+        lines += [worklist_line(e) for e in other]
+        lines.append("")
     lines += ["## Done / history", ""]
     if history:
         lines += [worklist_line(e) for e in history]
@@ -2912,7 +2949,7 @@ def worklist_cache_filename(owner: str) -> str:
     return worklist_filename(owner, ".json")
 
 
-WORKLIST_CORPORA = ("_commitments.json", "_action-items.json")
+WORKLIST_CORPORA = ("_commitments.json", "_action-items.json", "_tracking.json", "whosaid.toml")
 
 
 def corpora_digests(ws: Path) -> dict[str, str]:
@@ -2938,14 +2975,20 @@ def write_worklist_cache(path: Path, payload: dict, corpora: dict[str, str]) -> 
 
 
 def worklist_participants(cm_items: list[ActionItem | CommitmentItem], ai_items: list[ActionItem],
-                          owner: str = "", cfg: dict | None = None) -> list[str]:
+                          owner: str = "", cfg: dict | None = None, ws: Path | None = None,
+                          as_of: str | None = None) -> list[str]:
     """Every distinct speaker/owner label across both corpora, the resolved
     owner first, then first-seen order; labels that are the same person
     under same_person (or one of the owner's aliases) collapse onto the
     first spelling, so "Ali" never gets a worklist of its own."""
     out: list[str] = [owner] if owner else []
     om = OwnerMatcher(owner, owner_aliases(owner, cfg or {})) if owner else None
-    for label in [it.speaker for it in cm_items] + [it.owner for it in ai_items]:
+    labels = [it.speaker for it in cm_items] + [it.owner for it in ai_items]
+    if ws is not None:
+        from commitment_views import corpus_rows, enrich_rows
+        labels += [r.get("owner") or r.get("speaker") or "" for r in
+                   enrich_rows(ws, list(corpus_rows(ws).values()), as_of=as_of)]
+    for label in labels:
         label = (label or "").strip()
         if not label or any(same_person(label, have) for have in out):
             continue
@@ -2957,11 +3000,41 @@ def worklist_participants(cm_items: list[ActionItem | CommitmentItem], ai_items:
 
 def build_worklist(owner: str, cm_items: list[CommitmentItem], ai_items: list[ActionItem],
                    cfg: dict, matcher: TextMatcher, generated_from: list[str],
-                   today: date | None = None) -> tuple[list[dict], dict]:
+                   today: date | None = None, ws: Path | None = None,
+                   as_of: str | None = None) -> tuple[list[dict], dict]:
     """(ranked entries, --json payload) for one owner. `today` pins deadline
     expiry (callers pass worklist_today(); None means the clock)."""
+    annotations = None
+    identities = None
+    if ws is not None:
+        from commitment_views import enrich_rows, historical_row
+        from message_identity import MessageIndex
+        identities = MessageIndex(ws)
+        originals = [{**asdict(it), "owner": it.speaker, "source": "commitments"} for it in cm_items]
+        originals += [{**asdict(it), "source": "action-items"} for it in ai_items]
+        annotations = {r["id"]: r for r in enrich_rows(ws, originals, as_of=as_of, identities=identities)}
+    if as_of:
+        from tracking import _instant
+        today = _instant(as_of, end_of_day=True).date()
+        generated_from = [m for m in generated_from if m[:10] <= today.isoformat()]
     ranker = Ranker(cfg, latest_meeting(generated_from), today=today)
-    entries = worklist_entries(owner, cm_items, ai_items, matcher, owner_aliases(owner, cfg))
+    entries = worklist_entries(owner, cm_items, ai_items, matcher, owner_aliases(owner, cfg), annotations)
+    if ws is not None:
+        from commitment_views import enrich_rows
+        from message_identity import MessageIndex
+        entries = enrich_rows(ws, entries, as_of=as_of, identities=identities)
+        originals = {it.id: it for it in [*cm_items, *ai_items]}
+        for e in entries:
+            occurrences = []
+            for item_id in [e["id"], *e.get("also", [])]:
+                item = originals.get(item_id)
+                if item is not None:
+                    source = "action-items" if isinstance(item, ActionItem) else "transcript"
+                    occurrences.extend({**asdict(o), "source": getattr(o, "source", source),
+                                        "text": getattr(o, "text", item.text)} for o in item.occurrences)
+            occurrences = historical_row({"occurrences": occurrences}, as_of)["occurrences"]
+            e["independent_occurrences"] = len(identities.occurrence_keys(occurrences, text=e["text"]))
+            e["open"] = e["status"] not in ("done", "resolved", "delivered", "accepted", "superseded", "merged", "closed")
     phase(f"score {owner}")
     rank_entries(entries, ranker)
     return entries, worklist_payload(owner, entries, generated_from)
@@ -2975,7 +3048,7 @@ def write_worklists(ws: Path, cfg: dict, matcher: TextMatcher, cm_items: list[Co
     one pair per participant with --all-owners.
     A missing owner is a NOTE, never a failed roll-up."""
     owner = resolve_owner(ws, cfg, owner_arg)
-    targets = worklist_participants(cm_items, ai_items, owner, cfg) if all_owners \
+    targets = worklist_participants(cm_items, ai_items, owner, cfg, ws) if all_owners \
         else ([owner] if owner else [])
     if not owner and cm_items and not all_owners:
         log("NOTE worklist skipped: no owner (tag a 'self' role, set [workspace] owner "
@@ -2983,7 +3056,7 @@ def write_worklists(ws: Path, cfg: dict, matcher: TextMatcher, cm_items: list[Co
     today = worklist_today()
     corpora = corpora_digests(ws) if targets else {}
     for who in targets:
-        entries, payload = build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today)
+        entries, payload = build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today, ws)
         if not entries and not (who == owner and cm_items):
             continue
         out = ws / worklist_filename(who)
@@ -3014,11 +3087,13 @@ def cmd_worklist(args: argparse.Namespace) -> int:
     threshold = float(cm_data.get("similarity_threshold") or ai_data.get("similarity_threshold")
                       or SIMILARITY_THRESHOLD)
     phase("matcher")
-    matcher = build_matcher(cfg, threshold)
+    # Live evidence views join only proven source identities. They do not need
+    # embeddings or a model-server probe; semantic extraction remains in roll-up.
+    matcher = TextMatcher(threshold)
 
     owner = resolve_owner(ws, cfg, args.owner)
     if args.all_owners:
-        owners = worklist_participants(cm_items, ai_items, owner, cfg)
+        owners = worklist_participants(cm_items, ai_items, owner, cfg, ws, getattr(args, "as_of", None))
     else:
         if not owner:
             log("worklist: no owner: pass --owner NAME, tag a 'self' role, or set "
@@ -3029,7 +3104,12 @@ def cmd_worklist(args: argparse.Namespace) -> int:
     built = []
     for who in owners:
         phase(f"rank {who}")
-        built.append(build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today))
+        entries, payload = build_worklist(who, cm_items, ai_items, cfg, matcher, generated_from, today, ws,
+                                          getattr(args, "as_of", None))
+        from commitment_views import filter_rows
+        entries = filter_rows(entries, getattr(args, "kind", None), getattr(args, "status", None),
+                              getattr(args, "accepted_only", False))
+        built.append((entries, worklist_payload(who, entries, payload["generated_from"])))
     phase("write")
     if args.json:
         if args.all_owners:
@@ -3815,6 +3895,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "--json: {\"owners\": [...]})")
     pw.add_argument("--json", action="store_true",
                     help="emit {owner, generated_from, items: [...]} instead of markdown")
+    pw.add_argument("--kind", help="filter structured obligation kind")
+    pw.add_argument("--status", help="filter reconciled status")
+    pw.add_argument("--accepted-only", action="store_true", help="only accepted obligations")
+    pw.add_argument("--as-of", help="tracking state at an ISO date or timestamp")
     pw.add_argument("-o", "--out", default=None, help="write to FILE instead of stdout")
     pw.set_defaults(func=cmd_worklist)
     return p
@@ -3822,7 +3906,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ValueError, OSError) as exc:
+        log(str(exc))
+        return 1
 
 
 if __name__ == "__main__":

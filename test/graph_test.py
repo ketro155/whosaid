@@ -500,11 +500,16 @@ def test_commitments_view(ws: Path) -> None:
     cms = run_json("commitments", str(ws), "--json")
     check(len(cms) == 10 and [c["id"] for c in cms] == sorted(c["id"] for c in cms),
           "commitments lists every occurrence, id order")
-    check(cms[0] == {"id": "CM-001", "source": "action-items", "meeting": M1, "line": 5,
+    expected = {"id": "CM-001", "source": "action-items", "meeting": M1, "line": 5,
                      "t_sec": 721, "owner": "Alice_Example", "requester": "Bob_Example",
                      "requester_role": "", "text": "Ship the schema fix", "cue": "",
                      "negative": False, "status": "open", "ai_refs": ["AI-001", "AI-002"],
-                     "merged_into": ""}, f"commitments[0] shape: {cms[0]}")
+                     "merged_into": ""}
+    check({key: cms[0][key] for key in expected} == expected,
+          f"commitments[0] preserves source fields: {cms[0]}")
+    check(cms[0]["kind"] == "explicit_commitment" and cms[0]["accepted_owner"] == "Alice_Example"
+          and cms[0]["status_source"] == "corpus" and cms[0]["tracking_history"] == [],
+          "commitment enrichment retains attributed acceptance without inventing completion")
     check(cms[1]["source"] == "transcript" and cms[1]["requester_role"] == "peer",
           "transcript occurrence carries its role")
     check(cms[9]["negative"] is True and cms[9]["merged_into"] == "CM-005",
@@ -538,10 +543,13 @@ def test_commitments_view(ws: Path) -> None:
 def test_views(ws: Path) -> None:
     items = run_json("items", str(ws), "--json")
     check([it["id"] for it in items] == ["AI-001", "AI-002", "AI-003"], "items order")
-    check(items[0] == {"id": "AI-001", "text": "Ship the schema fix", "owner": "Alice_Example",
+    expected = {"id": "AI-001", "text": "Ship the schema fix", "owner": "Alice_Example",
                        "status": "open", "type": "leadership ask", "first_seen": M1, "last_seen": M1,
-                       "span": M1, "merged_into": "", "occurrences": 1, "requesters": ["Bob_Example"]},
-          f"items[0] shape: {items[0]}")
+                       "span": M1, "merged_into": "", "occurrences": 1, "requesters": ["Bob_Example"]}
+    check({key: items[0][key] for key in expected} == expected,
+          f"items[0] preserves source fields: {items[0]}")
+    check(items[0]["status_source"] == "corpus" and items[0]["tracking_history"] == []
+          and not items[0]["evidence_available"], "item enrichment does not invent completion evidence")
     check(items[2]["requesters"] == ["Bob_Example"], "AI-003 linked to Bob through the occurrence line")
     check([it["id"] for it in run_json("items", str(ws), "--status", "MERGED", "--json")] == ["AI-002"],
           "--status is a case-insensitive substring")
