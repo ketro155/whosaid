@@ -201,7 +201,7 @@ Typical workflow: whosaid_transcribe -> read the speaker cards in the result -> 
 
 Speakers can carry role tags (self/boss/peer/report/external) set via whosaid_relabel's `roles` param; roles appear in speaker cards and transcripts and tell you whose commitments matter most (boss ranks higher). "self" is the user's own voice.
 
-Dev-commitments = the cross-meeting corpus of commitments the self-roled speaker made to others/team. Extracted per-meeting into commitments.md/commitments.json (via `python3 lib/workspace.py commitments --transcript T --json-out F`, or `whosaid ingest --commitments`), then rolled up into _COMMITMENTS.md/_commitments.json with stable CM-NNN ids. whosaid_worklist(owner="me") answers "what did I sign up for, ranked": the owner's commitments plus the action items they own, tiered P1/P2/P3 (boss-requested, blocking or deadline cues, repeat across meetings, recency, cue strength) with a score and why strings; the same view the roll-up writes to _WORKLIST-<Owner>.md (the tool takes tier/limit/offset/compact and caps at 50 items unless told otherwise). If it times out, do not retry the same call: read the error's category/phase/hint, and use the attached `cached` result or call again with use_cache=true (it reports stale and generated_at).
+Dev-commitments = the cross-meeting corpus of commitments the self-roled speaker made to others/team. Extracted per-meeting into commitments.md/commitments.json (via `python3 lib/workspace.py commitments --transcript T --json-out F`, or `whosaid ingest --commitments`), then rolled up into _COMMITMENTS.md/_commitments.json with stable CM-NNN ids. whosaid_worklist(owner="me") answers "what did I sign up for, ranked": the owner's commitments plus the action items they own, tiered P1/P2/P3 (boss-requested, blocking or deadline cues, repeat across meetings, recency, cue strength) with a score and why strings; the same view the roll-up writes to _WORKLIST-<Owner>.md (the tool takes tier/limit/offset/compact and caps every page at 50 unless given an explicit limit). If it times out, do not retry the same call: read the error's category/phase/hint, and use the attached `cached` result or call again with use_cache=true (it reports stale and generated_at).
 
 Not exposed here: `enroll` and `record` are interactive microphone operations that need a live terminal. Run them from the `whosaid` CLI. The first transcribe downloads ~1.5 GB of models; run whosaid_doctor to check readiness. Full flag/env/long-audio reference: read the whosaid://guide resource.
 
@@ -1125,7 +1125,7 @@ _MAX_K = 100
 _MAX_WINDOW = 3600  # seconds of context either side; more than that is "read the transcript"
 _WORKLIST_TIERS = ("P1", "P2", "P3")
 # GitHub issue #30: one real worklist ran ~61k chars and blew the MCP tool-result
-# token limit, so a call with neither limit nor offset returns only the top N,
+# token limit, so omitting limit caps every page at N, including when offset is set,
 # reporting the rest via "omitted"/"hint" instead of dumping everything.
 _WORKLIST_DEFAULT_LIMIT = 50
 _WORKLIST_COMPACT_KEYS = ("id", "source", "text", "tier", "score", "why")
@@ -1296,9 +1296,9 @@ _DESC_WS_ITEMS = (
     "List action items from the workspace's entity graph, filtered by `owner`, `requester`, "
     "`status` or `type`. Each item carries its id (AI-NNN), text, owner, status and the "
     "meetings it was raised in; whosaid_item has the full history. Sorted by numeric id; "
-    "filters apply before paging. A call with neither `limit` nor `offset` returns only the "
-    "first 50, reporting `total`, `omitted` and `next_offset`; pass `offset=next_offset` (and "
-    "optionally `limit`) for the next page. `compact=true` trims each item to id, text, type, "
+    "filters apply before paging. Omitting `limit` caps every page at 50, even with `offset`, "
+    "reporting `total`, `omitted` and `next_offset`; pass `offset=next_offset` (and "
+    "an explicit `limit` for another page size). `compact=true` trims each item to id, text, type, "
     "owner, status and occurrences (the count of meetings with evidence). Paging is over the "
     "current index snapshot: every response carries `index_mtime`, and if it differs between "
     "pages the index was rebuilt, so restart from offset 0. Built by `whosaid index`; "
@@ -1330,22 +1330,22 @@ _DESC_WS_MEETINGS = (
     "whosaid://workspace/meeting/{folder}/... resources use. Newest first. Filter with kind, "
     "since/until (YYYY-MM-DD, inclusive, on the meeting date) and query (case-insensitive "
     "substring of folder or source name), then page with offset (skip N) and limit (top N); "
-    "compact=true keeps only folder, kind, created and minutes. A call with neither limit nor "
-    "offset returns the newest 50 plus total/omitted and a paging hint. Read-only."
+    "compact=true keeps only folder, kind, created and minutes. Omitting limit caps every "
+    "page at 50, even with offset; set limit for another size. Read-only."
 )
 
 _DESC_WS_PRS = (
     "List pull-request mentions found in the transcripts: PR numbers or links, who mentioned "
     "them, in which meeting and when. Read-only. Keywords: PR, pull request, code review, "
-    "merged, deployed. Page with offset/limit; a call with neither returns the first 50 plus "
-    "total/omitted and a paging hint."
+    "merged, deployed. Omitting limit caps every page at 50, even with offset; set limit "
+    "for another size. Replies include total/omitted and a paging hint."
 )
 
 _DESC_WS_SPEAKERS = (
     "List every speaker label in the search index with turn counts and the meetings they "
     "appear in. Use the exact labels as the `speaker` filter of whosaid_search or the `name` "
-    "of whosaid_person. Busiest first; page with offset/limit; a call with neither returns "
-    "the top 50 plus total/omitted and a paging hint. Read-only."
+    "of whosaid_person. Busiest first; omitting limit caps every page at 50, even with "
+    "offset; set limit for another size. Replies include total/omitted and a paging hint. Read-only."
 )
 
 _DESC_WS_WORKLIST = (
@@ -1358,8 +1358,8 @@ _DESC_WS_WORKLIST = (
     "self-roled speaker, else the whosaid.toml [workspace] owner). Filter and page with "
     "tier (P1/P2/P3, case-insensitive) first, then offset (skip N), then limit (top N); "
     "compact=true keeps only id, source, text, tier, score and why per item; a call with "
-    "neither limit nor offset returns the top 50 items plus total/omitted and a paging "
-    "hint (GitHub issue #30). Deterministic, no LLM, "
+    "an omitted limit returns at most 50 per page, even with offset; set limit for another size. Replies "
+    "include total/omitted/next_offset (GitHub issue #30). Deterministic, no LLM, "
     "same view as _WORKLIST-<Owner>.md. Errors carry a category (GitHub issue #113): "
     "missing_corpora (neither corpus exists; the only case that says to run the roll-up), "
     "timeout (with elapsed_s, the phase it was in and a hint for that phase, plus the "
@@ -1507,8 +1507,8 @@ def whosaid_items(
     """Shell `graph.py items <ws> [--owner ..] [--requester ..] [--status ..] [--type ..] --json`
     and return {"ok", "items": [...], "count", "total", "index_mtime"} paged like
     whosaid_meetings (GitHub issue #112): filters run in the CLI first, then rows are sorted
-    by (numeric id suffix, id), offset skips and limit caps; with neither, the response
-    self-caps at _LIST_DEFAULT_LIMIT. "omitted"/"next_offset"/"hint" appear while rows remain.
+    by (numeric id suffix, id), offset skips and limit caps; without an explicit limit,
+    every page self-caps at _LIST_DEFAULT_LIMIT. "omitted"/"next_offset"/"hint" appear while rows remain.
     "index_mtime" is the search index file's mtime (ISO-8601 UTC, null if absent): offsets are
     over the current snapshot, so if it differs between pages restart from offset 0.
     """
@@ -1609,9 +1609,9 @@ def _page_args(limit, offset) -> tuple[Optional[int], int, Optional[dict]]:
 
 def _paged(out: dict, key: str, rows: list, limit: Optional[int], offset: int) -> dict:
     """Slice rows into out[key] with count/total, self-capping at _LIST_DEFAULT_LIMIT when
-    neither limit nor offset was given, and add omitted/hint when rows were held back."""
+    limit was omitted, and add omitted/hint when rows were held back."""
     total = len(rows)
-    if limit is None and offset == 0:
+    if limit is None:
         limit = _LIST_DEFAULT_LIMIT
     rows = rows[offset:]
     if limit is not None:
@@ -1653,7 +1653,7 @@ def whosaid_meetings(
     "count", "total"} plus "omitted"/"hint" when rows were held back. Rows are sorted newest
     first (created, else a dated folder name; undated rows last), filtered by since/until
     (inclusive, on that day; undated rows drop out) and query, then offset skips and limit
-    caps; with neither, the response self-caps at _LIST_DEFAULT_LIMIT (GitHub issue #90).
+    caps; an omitted limit caps every page at _LIST_DEFAULT_LIMIT (GitHub issue #90).
     """
     ws, err = _resolve_ws(workspace)
     if err:
@@ -1779,13 +1779,13 @@ def _iso_mtime(ts: float) -> str:
 def _worklist_view(ws: Path, who: str, data: dict, tier: Optional[str], limit: Optional[int],
                    offset: int, compact: bool) -> dict:
     """One worklist payload filtered and paged the way the tool documents:
-    tier first, then offset, then limit (default cap when neither is given),
+    tier first, then offset, then limit (default cap whenever limit is omitted),
     then compact. Shared by the live, cached and use_cache answers."""
     items = data.get("items") if isinstance(data.get("items"), list) else []
     if tier is not None:
         items = [it for it in items if isinstance(it, dict) and str(it.get("tier", "")).upper() == tier]
     total = len(items)
-    if limit is None and offset == 0:
+    if limit is None:
         limit = _WORKLIST_DEFAULT_LIMIT  # self-limiting default (GitHub issue #30)
     items = items[offset:]
     if limit is not None:
@@ -1812,6 +1812,7 @@ def _worklist_view(ws: Path, who: str, data: dict, tier: Optional[str], limit: O
     omitted = total - (offset + len(items))
     if omitted > 0:
         out["omitted"] = omitted
+        out["next_offset"] = offset + len(items)
         out["hint"] = f"more remain: pass offset={offset + len(items)} (or limit/compact) to page"
     return out
 
@@ -1897,13 +1898,13 @@ def whosaid_worklist(
     """Shell `workspace.py worklist <ws> --owner <owner> --json`.
 
     Returns {"ok", "workspace", "owner", "generated_from": [meetings], "items": [...],
-    "count", "total", "source": "live"} plus "omitted"/"hint" when items were held back.
+    "count", "total", "source": "live"} plus "omitted"/"next_offset"/"hint" while more remain.
     Each item is {id, source, text, status, tier, score, why, first_seen, last_seen,
     occurrences, requested_by, negative, also}; compact=true keeps only id, source, text,
     tier, score, why. Reads _commitments.json and _action-items.json only (the roll-up
     writes them), never the index. tier filters the full ranked list first, then
     offset skips, then limit caps (the shell's order is never re-sorted); with
-    neither limit nor offset the response self-caps at _WORKLIST_DEFAULT_LIMIT
+    no explicit limit, every page self-caps at _WORKLIST_DEFAULT_LIMIT
     items (GitHub issue #30).
 
     GitHub issue #113: when neither corpus exists the answer is category
@@ -2250,8 +2251,8 @@ Roles tag who each speaker IS to the user, so commitments can be ranked:
   embed_threshold). Deterministic, no LLM. The MCP tool filters and pages this
   view (GitHub issue #30): tier (P1/P2/P3, case-insensitive) first, then offset
   skips, then limit caps; compact=true keeps only id, source, text, tier, score
-  and why per item; with neither limit nor offset it returns the top 50 plus
-  total/omitted and a paging hint.
+  and why per item. Omitting limit caps every page at 50, even with offset;
+  set limit for another size. Replies include total/omitted/next_offset and a paging hint.
 
 ## Long audio runs in parallel
 Recordings over ~15 min (900 s) auto-chunk: the file is split into windows,

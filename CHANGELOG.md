@@ -6,6 +6,13 @@ All notable changes to whosaid are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- **Default MCP pages stay bounded (#112).** Omitting `limit` now caps every page at 50,
+  including calls with `offset`, for items, meetings, PRs, speakers and worklists.
+  Explicit limits retain their requested size. Worklist replies also include
+  `next_offset` when more items remain.
+
 ## [1.16.0] - 2026-10-25
 
 ### Added

@@ -554,8 +554,8 @@ def test_worklist_paging(ws: Path, fake: FakeRunner) -> None:
           f"second page: {out}")
     fake.queue.append((payload, None))
     out = mcp_server.whosaid_worklist(offset=4)
-    check([it["id"] for it in out["items"]] == ["CM-004", "CM-005"] and "omitted" not in out and "limit" not in out,
-          f"offset alone pages to the end, no default cap: {out}")
+    check([it["id"] for it in out["items"]] == ["CM-004", "CM-005"] and "omitted" not in out and out["limit"] == 50,
+          f"offset alone keeps the default cap: {out}")
     fake.queue.append((payload, None))
     out = mcp_server.whosaid_worklist(offset=6)
     check(out["items"] == [] and out["count"] == 0 and out["total"] == 6 and "omitted" not in out,
