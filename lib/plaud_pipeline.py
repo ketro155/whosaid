@@ -289,6 +289,14 @@ def _sync(workspace: Path, cfg: dict, *, client=None, speech=transcribe, summary
             except Exception:
                 result["failed"] += 1
                 result["delivery_error"] = "DeliveryError"
+        if cfg.get("speaker_pilot"):
+            # The optional pilot runs after normal delivery and has no publisher.
+            # Its failure stays visible separately from source ingestion health.
+            from speaker_shadow_pilot import run_pending
+            try:
+                result["speaker_pilot"] = run_pending(workspace, cfg["speaker_pilot"])
+            except Exception as error:
+                result["speaker_pilot"] = {"status":"failed", "error":type(error).__name__, "publication_calls":0}
         pending = db.execute("select count(*),min(first_seen) from recordings where stage!='complete'").fetchone()
         result["pending"] = pending[0]
         result["oldest_pending_age_seconds"] = round(max(0, time.time() - pending[1])) if pending[1] else 0
@@ -339,7 +347,7 @@ def main() -> int:
             data = json.loads((a.workspace / "freshness.json").read_text())
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(data["at"])).total_seconds()
             print(json.dumps({**data, "age_seconds": round(age), "stale": age > 1800}))
-            return 1 if age > 1800 or data.get("failed") or data.get("quarantined") or data.get("backlog_overdue") else 0
+            return 1 if age > 1800 or data.get("failed") or data.get("quarantined") or data.get("backlog_overdue") or data.get("speaker_pilot", {}).get("status") == "failed" else 0
         if a.command in ("retry", "revise"):
             if not a.file_id:
                 p.error("retry/revise requires an exact --file-id")
@@ -363,7 +371,7 @@ def main() -> int:
             return 0
         result = sync(a.workspace, cfg)
         print(json.dumps(result))
-        return 1 if result["failed"] or result["quarantined"] or result.get("backlog_overdue") else 0
+        return 1 if result["failed"] or result["quarantined"] or result.get("backlog_overdue") or result.get("speaker_pilot", {}).get("status") == "failed" else 0
     except (PlaudError, SummaryError, OSError, ValueError, subprocess.SubprocessError) as e:
         if a.command == "sync" and a.workspace.is_dir():
             atomic_write(a.workspace / "freshness.json", json.dumps({"at": datetime.now(timezone.utc).isoformat(),

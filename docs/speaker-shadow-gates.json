@@ -1,0 +1,36 @@
+{
+  "scope": "Restricted private speaker pilot; no production identity promotion or incumbent deletion",
+  "incumbent": "Frozen production registry and observed source diarization; replay incumbent name matcher twice",
+  "candidate": "Interval recovery plus one explicitly allowed new multi-recording voice profile",
+  "fixed_set": {
+    "preflight_real_recordings": 2,
+    "new_work_recording_limit": 2,
+    "new_recording_cutoff": "2026-10-28 America/New_York",
+    "selection": "First two completed SMART/FMDS recordings on or after cutoff; fixed admissions cannot rotate",
+    "synthetic_guard_tests": 8,
+    "runs_per_arm": 2,
+    "profile_changes_after_freeze": "refused"
+  },
+  "gates": {
+    "contract_invalid_results": 0,
+    "source_words_changed": 0,
+    "existing_named_cluster_changes": 0,
+    "unapproved_identity_additions": 0,
+    "repeat_identity_outputs_equal": true,
+    "source_and_registry_hashes_unchanged": true,
+    "incumbent_replay_matches_observed_source": true,
+    "candidate_p50_seconds_max": 120,
+    "candidate_per_recording_seconds_max": 600,
+    "embedding_calls_per_recording_per_run_max": 200,
+    "paid_api_calls": 0,
+    "summary_calls_during_voice_evaluation": 0,
+    "publication_calls": 0,
+    "human_wrong_name_assignments": 0,
+    "new_named_intervals_human_reviewed_before_any_summary_publication": "all",
+    "broad_promotion_identity_precision_min": 0.95,
+    "broad_promotion_known_coverage_min": 0.80,
+    "broad_promotion_independent_meetings_per_enrolled_person_min": 2
+  },
+  "default_verdict": "KEEP incumbent while human truth, scale, or any other gate is incomplete",
+  "recanary": "Resolve named blockers and rerun the identical frozen source/profile set twice per arm"
+}
