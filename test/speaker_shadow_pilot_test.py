@@ -55,6 +55,16 @@ class ShadowTest(unittest.TestCase):
             _,_,decisions,calls=pilot.overlays(source,self.profiles,lambda a,b:self.fail('short interval embedded'),{'Alice'})
             self.assertEqual(calls,0)
 
+    def test_budget_exhaustion_keeps_all_remaining_speech_anonymous(self):
+        source={'emb_model':'fixture','names':{'SPEAKER_00':'SPEAKER_00'},
+                'segments':[{'start':i*6.,'end':i*6.+4.,'speaker':'SPEAKER_00'} for i in range(205)]}
+        segments,names,decisions,calls=pilot.overlays(source,self.profiles,lambda a,b:[1,0,0],{'Alice'})
+        self.assertEqual(calls,200)
+        self.assertEqual(len(decisions),205)
+        self.assertEqual(sum(r['reason']=='interval_budget_exhausted' for r in decisions),5)
+        self.assertTrue(all(r['name'] is None for r in decisions[-5:]))
+        self.assertEqual(sum(s['end']-s['start'] for s in segments),205*4)
+
     def test_snapshot_and_partial_run_controls_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);source=root/'source';source.mkdir();target=root/'pilot'

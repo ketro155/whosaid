@@ -51,7 +51,9 @@ def overlays(sidecar, profiles, embed, allowed_names):
                 if b - a < 4:
                     continue
                 if calls >= 200:
-                    raise ValueError('Pilot interval bound exceeded')
+                    decisions.append({'source_cluster':speaker, 'start':a, 'end':b,
+                                      'name':None, 'reason':'interval_budget_exhausted', 'scores':{}})
+                    continue
                 calls += 1
                 decision = interval_identity(embed(a, b), profiles, model=sidecar['emb_model'], duration=b-a)
                 if decision['name'] and decision['name'] not in allowed_names:
@@ -112,7 +114,8 @@ def compare(snapshot, output, baseline, candidate, allowed_names, *, embed=None)
               'source_words_preserved': True, 'existing_named_clusters_preserved': all(names[k] == v for k,v in side['names'].items()),
               'paid_api_calls': 0, 'summary_calls': 0, 'publication_calls': 0,
               'human_review': 'required', 'baseline_text_sha256': hashlib.sha256(base_text.encode()).hexdigest(),
-              'candidate_text_sha256': hashlib.sha256(text.encode()).hexdigest()}
+              'candidate_text_sha256': hashlib.sha256(text.encode()).hexdigest(),
+              'budget_abstentions':sum(r['reason']=='interval_budget_exhausted' for r in decisions)}
     atomic_write(output/'comparison.json', json.dumps(report, indent=2))
     return report
 
@@ -158,6 +161,9 @@ def run_record(source, folder, baseline, candidate, allowed_names):
                'baseline_replay_equal': all(r['baseline_replay_equal'] for r in reports),
                'human_review': 'required', 'verdict': 'KEEP', 'publication_calls': 0,
                'blockers': ['New identity intervals require human truth', 'Full-registry acceptance is not established']}
+    receipt['budget_abstentions'] = reports[0]['budget_abstentions']
+    if receipt['budget_abstentions']:
+        receipt['blockers'].append('Interval budget leaves additional speech unassessed and anonymous')
     atomic_write(folder/'receipt.json', json.dumps(receipt, indent=2))
     return receipt
 
