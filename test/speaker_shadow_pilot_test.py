@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import subprocess
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'lib'))
@@ -93,6 +95,29 @@ class ShadowTest(unittest.TestCase):
 
     def test_publishing_mode_is_rejected(self):
         with self.assertRaises(ValueError):pilot.run_pending(Path('/unused'),{'mode':'publish','max_recordings':2})
+
+    def test_pilot_failure_is_visible_without_reclassifying_intake(self):
+        from plaud_pipeline_test import PipelineTest
+        fixture=PipelineTest();fixture.setUp()
+        try:
+            fixture.cfg['speaker_pilot']={'mode':'shadow'}
+            with patch.object(pilot,'run_pending',side_effect=ValueError('injected failure')):
+                result=fixture.sync()
+            self.assertEqual(result['complete'],1)
+            self.assertEqual(result['failed'],0)
+            self.assertEqual(result['speaker_pilot']['status'],'failed')
+        finally:fixture.tearDown()
+
+    def test_status_process_fails_on_pilot_error_and_restored_control_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);data={'at':datetime.now(timezone.utc).isoformat(),'failed':0,'quarantined':0,
+                              'speaker_pilot':{'status':'failed'}}
+            command=[sys.executable,str(Path(pipeline.__file__)),'status','--workspace',str(p)]
+            (p/'freshness.json').write_text(json.dumps(data))
+            self.assertEqual(subprocess.run(command,capture_output=True).returncode,1)
+            data['speaker_pilot']['status']='awaiting_new_recordings'
+            (p/'freshness.json').write_text(json.dumps(data))
+            self.assertEqual(subprocess.run(command,capture_output=True).returncode,0)
 
 
 if __name__=='__main__':unittest.main()
