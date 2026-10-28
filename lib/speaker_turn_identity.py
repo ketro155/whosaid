@@ -9,6 +9,26 @@ import math
 import numpy as np
 
 
+def non_overlapping_spans(start, end, blocked):
+    """Subtract competing speech intervals before computing an identity feature."""
+    if not all(math.isfinite(value) for value in (start, end)) or start < 0 or end <= start:
+        raise ValueError("Invalid speech interval")
+    clips = []
+    for a, b in blocked:
+        if not all(math.isfinite(value) for value in (a, b)) or a < 0 or b <= a:
+            raise ValueError("Invalid competing interval")
+        if min(end, b) > max(start, a):
+            clips.append((max(start, a), min(end, b)))
+    cursor, clear = start, []
+    for a, b in sorted(clips):
+        if a > cursor:
+            clear.append((cursor, a))
+        cursor = max(cursor, b)
+    if cursor < end:
+        clear.append((cursor, end))
+    return clear
+
+
 def _unit(value):
     vector = np.asarray(value, dtype=np.float64)
     if vector.ndim != 1 or vector.size == 0 or not np.isfinite(vector).all():

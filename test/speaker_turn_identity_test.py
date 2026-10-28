@@ -4,7 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
-from speaker_turn_identity import interval_identity
+from speaker_turn_identity import interval_identity, non_overlapping_spans
 
 
 class IntervalIdentityTest(unittest.TestCase):
@@ -42,6 +42,17 @@ class IntervalIdentityTest(unittest.TestCase):
 
     def test_empty_registry_abstains(self):
         self.assertEqual(interval_identity([1, 0, 0], [], model='fixture', duration=6)['reason'], 'no_profiles')
+
+    def test_competing_speech_is_removed_before_scoring(self):
+        self.assertEqual(non_overlapping_spans(0, 10, [(2, 4), (3, 5), (8, 12)]), [(0, 2), (5, 8)])
+        self.assertEqual(non_overlapping_spans(0, 10, [(0, 10)]), [])
+        self.assertEqual(non_overlapping_spans(0, 10, [(10, 12)]), [(0, 10)])
+        self.assertEqual(non_overlapping_spans(0, 10, []), [(0, 10)])
+
+    def test_invalid_overlap_boundaries_fail(self):
+        for blocked in ([(3, 2)], [(math.nan, 3)], [(-1, 2)]):
+            with self.assertRaises(ValueError):
+                non_overlapping_spans(0, 10, blocked)
 
 
 if __name__ == '__main__':

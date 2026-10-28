@@ -179,7 +179,7 @@ To stop publication, unload the Studio launch agent. Preserve ownership and rece
 
 ## Speaker recognition shadow evaluation
 
-`lib/speaker_turn_identity.py` is an offline candidate and is not imported by the production transcription or publication paths. It considers one interval at a time: at least four seconds, cosine similarity at least 0.50, runner-up margin at least 0.15, and no overlapping speaker. Invalid embeddings, duplicate profiles and model mismatches fail closed. A clear interval does not name its cluster or neighbouring short fragments.
+`lib/speaker_turn_identity.py` is an offline candidate and is not imported by the production transcription or publication paths. It considers one interval at a time: at least four seconds, cosine similarity at least 0.50, runner-up margin at least 0.15, and no overlapping speaker. Invalid embeddings, duplicate profiles and model mismatches fail closed. `non_overlapping_spans` subtracts competing speech before the remaining spans are embedded and scored. A clear interval does not name its cluster or neighbouring short fragments.
 
 Candidate profiles, audio excerpts, biometric features and human labels belong in a private evaluation directory, outside Git. Freeze the training recording identities before scoring. A different interval from the same recording is not an independent held-out recording. Unknown identity is not proof of an unregistered speaker: use human-confirmed unregistered voices for negative controls. Candidate-selected excerpts remain unlabelled until a human identifies them; proposal scores are not truth.
 
